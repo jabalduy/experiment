@@ -40,7 +40,9 @@ func main() {
  id BIGSERIAL PRIMARY KEY, token TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
  grp TEXT NOT NULL CHECK(grp IN ('ranking','control')),
  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- finished_at TIMESTAMPTZ, score INT, stress INT CHECK(stress BETWEEN 1 AND 7)
+ finished_at TIMESTAMPTZ, score INT, stress INT CHECK(stress BETWEEN 1 AND 7),
+ baseline_stress INT CHECK(baseline_stress BETWEEN 1 AND 7),
+ ranking_seen BOOLEAN NOT NULL DEFAULT FALSE
  );
  CREATE TABLE IF NOT EXISTS answers (
  attempt_id BIGINT NOT NULL REFERENCES attempts(id),
@@ -48,6 +50,7 @@ func main() {
  elapsed_ms INT NOT NULL DEFAULT 0, PRIMARY KEY(attempt_id,question_id)
  );`
  if _,err=db.Exec(ctx,schema);err!=nil {log.Fatal(err)}
+ if _,err=db.Exec(ctx,`ALTER TABLE attempts ADD COLUMN IF NOT EXISTS baseline_stress INT CHECK(baseline_stress BETWEEN 1 AND 7); ALTER TABLE attempts ADD COLUMN IF NOT EXISTS ranking_seen BOOLEAN NOT NULL DEFAULT FALSE`);err!=nil {log.Fatal(err)}
  a:=&App{db:db,quiz:q,page:template.Must(template.New("page").Funcs(template.FuncMap{"add":func(a,b int)int{return a+b},"seq7":func()[]int{return []int{1,2,3,4,5,6,7}}}).Parse(htmlPage))}
  mux:=http.NewServeMux()
  mux.HandleFunc("GET /",a.home)
@@ -76,6 +79,7 @@ func (a *App) start(w http.ResponseWriter,r *http.Request) {
  if err:=r.ParseForm();err!=nil {http.Error(w,"Bad form",400);return}
  name:=strings.TrimSpace(r.FormValue("name"))
  if len([]rune(name))<2||len([]rune(name))>60||r.FormValue("consent")!="yes" {a.render(w,PageData{Quiz:a.quiz,Error:"Введите имя (2–60 символов) и подтвердите согласие."});return}
+ baseline,err:=strconv.Atoi(r.FormValue("baseline_stress"));if err!=nil||baseline<1||baseline>7 {a.render(w,PageData{Quiz:a.quiz,Error:"Оцените напряжение до теста по шкале 1–7."});return}
  t,err:=token();if err!=nil {http.Error(w,"Server error",500);return}
  ctx:=r.Context()
  tx,err:=a.db.Begin(ctx);if err!=nil {http.Error(w,"Database error",500);return}
@@ -86,7 +90,7 @@ func (a *App) start(w http.ResponseWriter,r *http.Request) {
  err=tx.QueryRow(ctx,"SELECT count(*) FILTER (WHERE grp='ranking'), count(*) FILTER (WHERE grp='control') FROM attempts").Scan(&nr,&nc)
  if err!=nil {http.Error(w,"Database error",500);return}
  group:="ranking";if nr>nc {group="control"} else if nr==nc {var b [1]byte;if _,err=rand.Read(b[:]);err!=nil {http.Error(w,"Server error",500);return};if b[0]%2==0 {group="control"}}
- _,err=tx.Exec(ctx,"INSERT INTO attempts(token,name,grp) VALUES($1,$2,$3)",t,name,group)
+ _,err=tx.Exec(ctx,"INSERT INTO attempts(token,name,grp,baseline_stress) VALUES($1,$2,$3,$4)",t,name,group,baseline)
  if err!=nil {http.Error(w,"Database error",500);return}
  if err=tx.Commit(ctx);err!=nil {http.Error(w,"Database error",500);return}
  http.SetCookie(w,&http.Cookie{Name:"experiment_session",Value:t,Path:"/",HttpOnly:true,SameSite:http.SameSiteLaxMode,Secure:r.TLS!=nil,MaxAge:86400})
@@ -137,6 +141,7 @@ func (a *App) getRanking(ctx context.Context) ([]Row,error) {
 func (a *App) leaderboard(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil||at.Group!="ranking" {http.Error(w,"Forbidden",403);return}
  rows,err:=a.getRanking(r.Context());if err!=nil {http.Error(w,"Database error",500);return}
+ if len(rows)>0 && !at.Finished {_,_ = a.db.Exec(r.Context(),"UPDATE attempts SET ranking_seen=TRUE WHERE id=$1",at.ID)}
  w.Header().Set("Content-Type","application/json");w.Header().Set("Cache-Control","no-store");json.NewEncoder(w).Encode(rows)
 }
 func (a *App) result(w http.ResponseWriter,r *http.Request) {
@@ -149,19 +154,19 @@ func (a *App) result(w http.ResponseWriter,r *http.Request) {
 func (a *App) export(w http.ResponseWriter,r *http.Request) {
  key:=os.Getenv("ADMIN_KEY")
  if key==""||r.Header.Get("X-Admin-Key")!=key {http.Error(w,"Forbidden",403);return}
- rows,err:=a.db.Query(r.Context(),`SELECT a.id,a.name,a.grp,a.started_at,a.finished_at,a.score,a.stress,
+ rows,err:=a.db.Query(r.Context(),`SELECT a.id,a.name,a.grp,a.started_at,a.finished_at,a.score,a.stress,a.baseline_stress,a.ranking_seen,
  COALESCE(b.question_id,''),b.choice,b.correct,b.elapsed_ms
  FROM attempts a LEFT JOIN answers b ON b.attempt_id=a.id ORDER BY a.id,b.question_id`)
  if err!=nil {http.Error(w,"Database error",500);return};defer rows.Close()
  w.Header().Set("Content-Type","text/csv; charset=utf-8");w.Header().Set("Content-Disposition","attachment; filename=experiment.csv")
  writer:=csv.NewWriter(w);defer writer.Flush()
- writer.Write([]string{"attempt_id","name","group","started_at","finished_at","score","stress_1_7","question_id","choice_index","correct","elapsed_ms"})
+ writer.Write([]string{"attempt_id","name","group","started_at","finished_at","score","stress_1_7","baseline_stress_1_7","ranking_seen","question_id","choice_index","correct","elapsed_ms"})
  for rows.Next() {
-  var id int64;var name,group,start,qid string;var end *time.Time;var score,stress,choice,elapsed *int;var correct *bool
+  var id int64;var name,group,start,qid string;var end *time.Time;var score,stress,baseline,choice,elapsed *int;var correct *bool;var rankingSeen bool
   var started time.Time
-  if err=rows.Scan(&id,&name,&group,&started,&end,&score,&stress,&qid,&choice,&correct,&elapsed);err!=nil {log.Println(err);return}
+  if err=rows.Scan(&id,&name,&group,&started,&end,&score,&stress,&baseline,&rankingSeen,&qid,&choice,&correct,&elapsed);err!=nil {log.Println(err);return}
   start=started.Format(time.RFC3339)
-  writer.Write([]string{fmt.Sprint(id),name,group,start,fmtTime(end),fmtPtr(score),fmtPtr(stress),qid,fmtPtr(choice),fmtBool(correct),fmtPtr(elapsed)})
+  writer.Write([]string{fmt.Sprint(id),name,group,start,fmtTime(end),fmtPtr(score),fmtPtr(stress),fmtPtr(baseline),strconv.FormatBool(rankingSeen),qid,fmtPtr(choice),fmtBool(correct),fmtPtr(elapsed)})
  }
  if err=rows.Err();err!=nil {log.Println(err)}
 }
@@ -173,8 +178,8 @@ const htmlPage = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><me
 :root{font-family:system-ui,-apple-system,sans-serif;color:#182235;background:#f3f5f9}*{box-sizing:border-box}body{margin:0}.wrap{max-width:1000px;margin:48px auto;padding:0 20px}.card{background:white;border-radius:18px;padding:32px;box-shadow:0 8px 32px #18223512}h1{font-size:32px;margin:0 0 12px}p{line-height:1.55;color:#526075}.grid{display:grid;grid-template-columns:1fr 300px;gap:24px}.question{padding:20px 0;border-bottom:1px solid #e7ebf0}.option{display:block;margin:10px 0;padding:12px;border:1px solid #dfe4ec;border-radius:10px;cursor:pointer}.option:has(input:checked){border-color:#4255df;background:#eef0ff}input[type=text]{padding:12px;width:100%;border:1px solid #cbd2df;border-radius:8px;font-size:16px}button{border:0;background:#4255df;color:white;padding:14px 22px;border-radius:10px;font-size:16px;cursor:pointer;margin-top:16px}.muted{font-size:14px;color:#718096}.rank{position:sticky;top:20px;align-self:start}.rank ol{padding-left:24px}.rank li{padding:6px 0}.error{color:#b42318}.stress{display:flex;gap:8px;flex-wrap:wrap}.stress label{padding:8px;border:1px solid #dfe4ec;border-radius:8px}@media(max-width:740px){.grid{grid-template-columns:1fr}.wrap{margin:20px auto}.card{padding:20px}.rank{position:static}}
 </style></head><body><main class="wrap">
 {{if eq .Attempt.ID 0}}
-<section class="card"><h1>{{.Quiz.Title}}</h1><p>{{.Quiz.Description}}</p><p>В исследовании сравниваются два способа прохождения одинакового теста. Участие добровольное; ваши ответы и оценка напряжения сохраняются для учебного анализа. Имя будет видно другим участникам только в условии с рейтингом. Не вводите полное имя, используйте псевдоним.</p>{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
-<form method="post" action="/start"><label>Ваше имя или псевдоним<input name="name" maxlength="60" minlength="2" required autocomplete="nickname"></label><p><label><input type="checkbox" name="consent" value="yes" required> Я согласен(на) участвовать и на сохранение ответов для учебного анализа.</label></p><button>Начать тест</button></form></section>
+<section class="card"><h1>{{.Quiz.Title}}</h1><p>{{.Quiz.Description}}</p><p>В исследовании сравниваются два способа прохождения одинакового теста. Участие добровольное; ваши ответы и оценка напряжения сохраняются для учебного анализа. Псевдоним может быть виден другим участникам в условии с рейтингом. Не вводите полное имя, используйте псевдоним.</p>{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+<form method="post" action="/start"><label>Ваше имя или псевдоним<input name="name" maxlength="60" minlength="2" required autocomplete="nickname"></label><div class="question"><h3>Какое напряжение вы испытываете прямо сейчас, до начала теста?</h3><p class="muted">1 — совсем нет, 7 — очень сильное.</p><div class="stress">{{range seq7}}<label><input type="radio" name="baseline_stress" value="{{.}}" required> {{.}}</label>{{end}}</div></div><p><label><input type="checkbox" name="consent" value="yes" required> Я согласен(на) участвовать и на сохранение ответов для учебного анализа.</label></p><button>Начать тест</button></form></section>
 {{else if .Attempt.Finished}}
 <section class="card"><h1>Тест завершён</h1><p>Спасибо за участие, {{.Attempt.Name}}!</p><h2>Ваш результат: {{.Attempt.Score}} из {{.Total}}</h2>{{if eq .Attempt.Group "ranking"}}<h3>Рейтинг участников</h3><ol>{{range .Ranking}}<li>{{.Name}} — {{.Score}} / {{.Total}}</li>{{else}}<li>Пока нет результатов</li>{{end}}</ol>{{end}}</section>
 {{else}}
@@ -182,7 +187,7 @@ const htmlPage = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><me
 {{range $i,$q:=.Quiz.Questions}}<div class="question" data-q="{{$q.ID}}"><h3>{{add $i 1}}. {{$q.Text}}</h3>{{range $j,$option:=$q.Options}}<label class="option"><input type="radio" name="answer_{{$q.ID}}" value="{{$j}}" required> {{$option}}</label>{{end}}<input type="hidden" name="time_{{$q.ID}}" value="0"></div>{{end}}
 <div class="question"><h3>Насколько сильное напряжение вы испытывали во время теста?</h3><p class="muted">1 — совсем не испытывал(а), 7 — очень сильное.</p><div class="stress">{{range seq7}}<label><input type="radio" name="stress" value="{{.}}" required> {{.}}</label>{{end}}</div></div>
 <button type="submit">Завершить тест</button></form></section>
-{{if eq .Attempt.Group "ranking"}}<aside class="card rank"><h3>Текущий рейтинг</h3><p class="muted">Результаты участников, уже закончивших тест</p><ol id="leaderboard"><li>Загрузка…</li></ol></aside>{{end}}</div>
+{{if eq .Attempt.Group "ranking"}}<aside class="card rank"><h3>Текущий рейтинг</h3><p class="muted">Результаты участников, уже закончивших тест. Если список пуст, рейтинг пока не сформирован</p><ol id="leaderboard"><li>Загрузка…</li></ol></aside>{{end}}</div>
 <script>
 const started=Date.now();document.querySelectorAll('[data-q]').forEach(el=>{const input=el.querySelector('input[type=hidden]');el.querySelectorAll('input[type=radio]').forEach(r=>r.addEventListener('change',()=>{input.value=String(Date.now()-started)}))});
 {{if eq .Attempt.Group "ranking"}}
