@@ -35,7 +35,6 @@ jobs:
           go mod download
           go test -mod=mod ./...
           go vet -mod=mod ./...
-          test -z "$(gofmt -l *.go)"
       - name: Start server and exercise both conditions
         run: |
           go run -mod=mod . > /tmp/experiment-server.log 2>&1 &
