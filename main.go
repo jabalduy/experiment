@@ -6,7 +6,6 @@ import (
  "encoding/csv"
  "encoding/hex"
  "encoding/json"
- "errors"
  "fmt"
  "html/template"
  "log"
@@ -16,7 +15,6 @@ import (
  "strings"
  "time"
 
- "github.com/jackc/pgx/v5"
  "github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -69,7 +67,7 @@ func (a *App) render(w http.ResponseWriter,data PageData) {
 }
 func (a *App) home(w http.ResponseWriter,r *http.Request) {
  at,_:=a.current(r)
- if at.ID!=0 {http.Redirect(w,r,"/result",http.StatusSeeOther);if !at.Finished {http.Redirect(w,r,"/test",http.StatusSeeOther)};return}
+ if at.ID!=0 {if at.Finished {http.Redirect(w,r,"/result",http.StatusSeeOther)} else {http.Redirect(w,r,"/test",http.StatusSeeOther)};return}
  a.render(w,PageData{Quiz:a.quiz})
 }
 func token() (string,error) {b:=make([]byte,32);if _,err:=rand.Read(b);err!=nil{return "",err};return hex.EncodeToString(b),nil}
@@ -170,8 +168,6 @@ func (a *App) export(w http.ResponseWriter,r *http.Request) {
 func fmtPtr(v *int) string {if v==nil{return ""};return strconv.Itoa(*v)}
 func fmtBool(v *bool) string {if v==nil{return ""};return strconv.FormatBool(*v)}
 func fmtTime(v *time.Time) string {if v==nil{return ""};return v.Format(time.RFC3339)}
-var _ = errors.Is
-var _ = pgx.ErrNoRows
 
 const htmlPage = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{.Quiz.Title}}</title><style>
 :root{font-family:system-ui,-apple-system,sans-serif;color:#182235;background:#f3f5f9}*{box-sizing:border-box}body{margin:0}.wrap{max-width:1000px;margin:48px auto;padding:0 20px}.card{background:white;border-radius:18px;padding:32px;box-shadow:0 8px 32px #18223512}h1{font-size:32px;margin:0 0 12px}p{line-height:1.55;color:#526075}.grid{display:grid;grid-template-columns:1fr 300px;gap:24px}.question{padding:20px 0;border-bottom:1px solid #e7ebf0}.option{display:block;margin:10px 0;padding:12px;border:1px solid #dfe4ec;border-radius:10px;cursor:pointer}.option:has(input:checked){border-color:#4255df;background:#eef0ff}input[type=text]{padding:12px;width:100%;border:1px solid #cbd2df;border-radius:8px;font-size:16px}button{border:0;background:#4255df;color:white;padding:14px 22px;border-radius:10px;font-size:16px;cursor:pointer;margin-top:16px}.muted{font-size:14px;color:#718096}.rank{position:sticky;top:20px;align-self:start}.rank ol{padding-left:24px}.rank li{padding:6px 0}.error{color:#b42318}.stress{display:flex;gap:8px;flex-wrap:wrap}.stress label{padding:8px;border:1px solid #dfe4ec;border-radius:8px}@media(max-width:740px){.grid{grid-template-columns:1fr}.wrap{margin:20px auto}.card{padding:20px}.rank{position:static}}
@@ -195,4 +191,3 @@ refresh();setInterval(refresh,10000);
 {{end}}
 </script>
 {{end}}</main></body></html>`
-func init() { _ = template.FuncMap{} }
