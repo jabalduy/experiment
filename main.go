@@ -171,25 +171,7 @@ func (a *App) result(w http.ResponseWriter,r *http.Request) {
  a.render(w,data)
 }
 
-func (a *App) admin(w http.ResponseWriter,r *http.Request) {
- key:=os.Getenv("ADMIN_KEY")
- if key=="" || r.Header.Get("X-Admin-Key")!=key {http.Error(w,"Forbidden: set ADMIN_KEY and send X-Admin-Key header",403);return}
- rows,err:=a.db.Query(r.Context(),`SELECT grp, count(*)::int,
- count(*) FILTER (WHERE finished_at IS NOT NULL)::int,
- COALESCE(avg(score) FILTER (WHERE finished_at IS NOT NULL),0)::float8,
- COALESCE(avg(stress-baseline_stress) FILTER (WHERE finished_at IS NOT NULL),0)::float8,
- COALESCE(avg(extract(epoch from finished_at-test_started_at)) FILTER (WHERE finished_at IS NOT NULL),0)::float8
- FROM attempts GROUP BY grp ORDER BY grp`)
- if err!=nil {http.Error(w,"Database error",500);return};defer rows.Close()
- w.Header().Set("Content-Type","text/html; charset=utf-8");w.Header().Set("Cache-Control","no-store")
- fmt.Fprint(w,`<!doctype html><html lang="ru"><meta charset="utf-8"><title>Аналитика эксперимента</title><style>body{font:16px system-ui;max-width:950px;margin:50px auto;padding:20px;background:#f4f6fa}table{border-collapse:collapse;background:white;width:100%}td,th{padding:15px;border-bottom:1px solid #ddd;text-align:left}</style><h1>Аналитика эксперимента</h1><p>Средние показатели рассчитаны среди завершивших тест. Данные описательные, без проверки статистической значимости.</p><table><tr><th>Группа</th><th>Начали</th><th>Завершили</th><th>Средний балл</th><th>Изменение напряжения</th><th>Время (сек)</th></tr>`)
- for rows.Next(){var group string;var started,finished int;var score,stress,duration float64
- if err=rows.Scan(&group,&started,&finished,&score,&stress,&duration);err!=nil {log.Println(err);return}
- fmt.Fprintf(w,"<tr><td>%s</td><td>%d</td><td>%d</td><td>%.2f / %d</td><td>%+.2f</td><td>%.1f</td></tr>",template.HTMLEscapeString(group),started,finished,score,len(a.quiz.Questions),stress,duration)
- }
- if err=rows.Err();err!=nil {log.Println(err);return}
- fmt.Fprint(w,"</table><p>Для выгрузки CSV используйте /admin/export с тем же заголовком X-Admin-Key.</p>")
-}
+func (a *App) admin(w http.ResponseWriter,r *http.Request) { a.adminDashboard(w,r) }
 
 func (a *App) export(w http.ResponseWriter,r *http.Request) {
  key:=os.Getenv("ADMIN_KEY")
