@@ -1,0 +1,9 @@
+.git
+.github
+*.zip
+*.log
+.env
+.env.*
+data/
+scripts/
+README.md
