@@ -52,6 +52,7 @@ def run():
     expect_forbidden(admin, "/admin/export")
     expect_forbidden(admin, "/api/leaderboard")
 
+    assigned_groups = []
     for number in (1, 2):
         person = client()
         status, _, landing = request(person, "/")
@@ -64,7 +65,9 @@ def run():
         assert status == 200 and "/briefing" in url, url
         assert "Начать отвечать" in briefing
         is_ranking = "Соревновательный режим" in briefing
-        assert is_ranking == (number == 1), "Balanced assignment mismatch"
+        assigned_groups.append(is_ranking)
+        if number == 2:
+            assert assigned_groups[0] != assigned_groups[1], "Balanced assignment mismatch"
 
         status, url, blocked = request(person, "/test")
         assert "/briefing" in url and "answer_q" not in blocked
@@ -89,7 +92,7 @@ def run():
         assert "/result" in url, "Second submission should redirect to result"
         if is_ranking:
             status, _, ranking = request(person, "/api/leaderboard")
-            assert "Pilot 1" in ranking
+            assert "Pilot " + str(number) in ranking
         else:
             expect_forbidden(person, "/api/leaderboard")
 
