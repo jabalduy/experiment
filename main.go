@@ -60,6 +60,7 @@ func main() {
  mux.HandleFunc("GET /result",a.result)
  mux.HandleFunc("GET /api/leaderboard",a.leaderboard)
  mux.HandleFunc("GET /admin/export",a.export)
+ mux.HandleFunc("GET /admin",a.admin)
  port:=os.Getenv("PORT");if port=="" {port="8080"}
  log.Println("Listening on :",port)
  log.Fatal(http.ListenAndServe(":"+port,mux))
@@ -75,7 +76,7 @@ func (a *App) home(w http.ResponseWriter,r *http.Request) {
 }
 func token() (string,error) {b:=make([]byte,32);if _,err:=rand.Read(b);err!=nil{return "",err};return hex.EncodeToString(b),nil}
 func (a *App) start(w http.ResponseWriter,r *http.Request) {
- if at,_:=a.current(r);at.ID!=0 {http.Redirect(w,r,"/test",http.StatusSeeOther);return}
+ if at,_:=a.current(r);at.ID!=0 {if at.Finished {http.Redirect(w,r,"/result",303)} else {http.Redirect(w,r,"/test",303)};return}
  if err:=r.ParseForm();err!=nil {http.Error(w,"Bad form",400);return}
  name:=strings.TrimSpace(r.FormValue("name"))
  if len([]rune(name))<2||len([]rune(name))>60||r.FormValue("consent")!="yes" {a.render(w,PageData{Quiz:a.quiz,Error:"Введите имя (2–60 символов) и подтвердите согласие."});return}
@@ -141,16 +142,37 @@ func (a *App) getRanking(ctx context.Context) ([]Row,error) {
 func (a *App) leaderboard(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil||at.Group!="ranking" {http.Error(w,"Forbidden",403);return}
  rows,err:=a.getRanking(r.Context());if err!=nil {http.Error(w,"Database error",500);return}
- if len(rows)>0 && !at.Finished {_,_ = a.db.Exec(r.Context(),"UPDATE attempts SET ranking_seen=TRUE WHERE id=$1",at.ID)}
+ if !at.Finished {http.Error(w,"Ranking available after completion only",403);return}
  w.Header().Set("Content-Type","application/json");w.Header().Set("Cache-Control","no-store");json.NewEncoder(w).Encode(rows)
 }
 func (a *App) result(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil {http.Redirect(w,r,"/",303);return}
  if !at.Finished {http.Redirect(w,r,"/test",303);return}
  data:=PageData{Quiz:a.quiz,Attempt:at,Total:len(a.quiz.Questions)}
- if at.Group=="ranking" {data.Ranking,_=a.getRanking(r.Context())}
+ if at.Group=="ranking" {data.Ranking,err=a.getRanking(r.Context());if err!=nil {http.Error(w,"Database error",500);return}}
  a.render(w,data)
 }
+
+func (a *App) admin(w http.ResponseWriter,r *http.Request) {
+ key:=os.Getenv("ADMIN_KEY")
+ if key=="" || r.Header.Get("X-Admin-Key")!=key {http.Error(w,"Forbidden: set ADMIN_KEY and send X-Admin-Key header",403);return}
+ rows,err:=a.db.Query(r.Context(),`SELECT grp, count(*)::int,
+ count(*) FILTER (WHERE finished_at IS NOT NULL)::int,
+ COALESCE(avg(score) FILTER (WHERE finished_at IS NOT NULL),0)::float8,
+ COALESCE(avg(stress-baseline_stress) FILTER (WHERE finished_at IS NOT NULL),0)::float8,
+ COALESCE(avg(extract(epoch from finished_at-started_at)) FILTER (WHERE finished_at IS NOT NULL),0)::float8
+ FROM attempts GROUP BY grp ORDER BY grp`)
+ if err!=nil {http.Error(w,"Database error",500);return};defer rows.Close()
+ w.Header().Set("Content-Type","text/html; charset=utf-8");w.Header().Set("Cache-Control","no-store")
+ fmt.Fprint(w,`<!doctype html><html lang="ru"><meta charset="utf-8"><title>Аналитика эксперимента</title><style>body{font:16px system-ui;max-width:950px;margin:50px auto;padding:20px;background:#f4f6fa}table{border-collapse:collapse;background:white;width:100%}td,th{padding:15px;border-bottom:1px solid #ddd;text-align:left}</style><h1>Аналитика эксперимента</h1><p>Средние показатели рассчитаны среди завершивших тест. Данные описательные, без проверки статистической значимости.</p><table><tr><th>Группа</th><th>Начали</th><th>Завершили</th><th>Средний балл</th><th>Изменение напряжения</th><th>Время (сек)</th></tr>`)
+ for rows.Next(){var group string;var started,finished int;var score,stress,duration float64
+ if err=rows.Scan(&group,&started,&finished,&score,&stress,&duration);err!=nil {log.Println(err);return}
+ fmt.Fprintf(w,"<tr><td>%s</td><td>%d</td><td>%d</td><td>%.2f / %d</td><td>%+.2f</td><td>%.1f</td></tr>",template.HTMLEscapeString(group),started,finished,score,len(a.quiz.Questions),stress,duration)
+ }
+ if err=rows.Err();err!=nil {log.Println(err);return}
+ fmt.Fprint(w,"</table><p>Для выгрузки CSV используйте /admin/export с тем же заголовком X-Admin-Key.</p>")
+}
+
 func (a *App) export(w http.ResponseWriter,r *http.Request) {
  key:=os.Getenv("ADMIN_KEY")
  if key==""||r.Header.Get("X-Admin-Key")!=key {http.Error(w,"Forbidden",403);return}
@@ -183,16 +205,12 @@ const htmlPage = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><me
 {{else if .Attempt.Finished}}
 <section class="card"><h1>Тест завершён</h1><p>Спасибо за участие, {{.Attempt.Name}}!</p><h2>Ваш результат: {{.Attempt.Score}} из {{.Total}}</h2>{{if eq .Attempt.Group "ranking"}}<h3>Рейтинг участников</h3><ol>{{range .Ranking}}<li>{{.Name}} — {{.Score}} / {{.Total}}</li>{{else}}<li>Пока нет результатов</li>{{end}}</ol>{{end}}</section>
 {{else}}
-<h1>{{.Quiz.Title}}</h1><p>{{.Quiz.Description}}</p><div class="grid"><section class="card"><form id="quizForm" method="post" action="/finish">
+<h1>{{.Quiz.Title}}</h1>{{if eq .Attempt.Group "ranking"}}<section class="card"><h2>Соревновательный режим</h2><p><strong>Вы соревнуетесь с другими студентами.</strong> Ваш результат попадёт в общую таблицу лидеров, которую вы увидите после завершения теста.</p></section>{{else}}<section class="card"><p>Пройдите тест. Ваш результат будет показан после завершения.</p></section>{{end}}<p>{{.Quiz.Description}}</p><div class="grid"><section class="card"><form id="quizForm" method="post" action="/finish">
 {{range $i,$q:=.Quiz.Questions}}<div class="question" data-q="{{$q.ID}}"><h3>{{add $i 1}}. {{$q.Text}}</h3>{{range $j,$option:=$q.Options}}<label class="option"><input type="radio" name="answer_{{$q.ID}}" value="{{$j}}" required> {{$option}}</label>{{end}}<input type="hidden" name="time_{{$q.ID}}" value="0"></div>{{end}}
 <div class="question"><h3>Насколько сильное напряжение вы испытывали во время теста?</h3><p class="muted">1 — совсем не испытывал(а), 7 — очень сильное.</p><div class="stress">{{range seq7}}<label><input type="radio" name="stress" value="{{.}}" required> {{.}}</label>{{end}}</div></div>
 <button type="submit">Завершить тест</button></form></section>
-{{if eq .Attempt.Group "ranking"}}<aside class="card rank"><h3>Текущий рейтинг</h3><p class="muted">Результаты участников, уже закончивших тест. Если список пуст, рейтинг пока не сформирован</p><ol id="leaderboard"><li>Загрузка…</li></ol></aside>{{end}}</div>
+</div>
 <script>
 const started=Date.now();document.querySelectorAll('[data-q]').forEach(el=>{const input=el.querySelector('input[type=hidden]');el.querySelectorAll('input[type=radio]').forEach(r=>r.addEventListener('change',()=>{input.value=String(Date.now()-started)}))});
-{{if eq .Attempt.Group "ranking"}}
-async function refresh(){try{const res=await fetch('/api/leaderboard',{cache:'no-store'});if(!res.ok)return;const rows=await res.json();const ol=document.getElementById('leaderboard');ol.replaceChildren();if(!rows.length){const li=document.createElement('li');li.textContent='Пока нет результатов';ol.append(li)}rows.forEach(v=>{const li=document.createElement('li');li.textContent=v.name+' — '+v.score+'/'+v.total;ol.append(li)})}catch(e){}}
-refresh();setInterval(refresh,10000);
-{{end}}
 </script>
 {{end}}</main></body></html>`
