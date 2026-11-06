@@ -56,14 +56,13 @@ def run():
     for number in (1, 2):
         person = client()
         status, _, landing = request(person, "/")
-        assert status == 200 and "baseline_stress" in landing
+        assert status == 200 and "name=\"name\"" in landing and "baseline_stress" not in landing
         status, url, briefing = request(person, "/start", {
             "name": "Pilot " + str(number),
-            "baseline_stress": "3",
             "consent": "yes",
         })
         assert status == 200 and "/briefing" in url, url
-        assert "Начать отвечать" in briefing
+        assert "Начать отвечать" in briefing and "baseline_stress" in briefing
         is_ranking = "Соревновательный режим" in briefing
         assigned_groups.append(is_ranking)
         if number == 2:
@@ -72,7 +71,7 @@ def run():
         status, url, blocked = request(person, "/test")
         assert "/briefing" in url and "answer_q" not in blocked
 
-        status, url, page = request(person, "/begin", {})
+        status, url, page = request(person, "/begin", {"baseline_stress": "3"})
         assert "/test" in url and "quizForm" in page
         assert "Таблица лидеров" not in page
         assert "Соревновательный режим" not in page
@@ -95,6 +94,31 @@ def run():
             assert "Pilot " + str(number) in ranking
         else:
             expect_forbidden(person, "/api/leaderboard")
+
+    # Explicit invitation links must override automatic group balancing.
+    for group in ("ranking", "control"):
+        person = client()
+        status, _, invitation = request(person, "/join/" + group)
+        assert status == 200 and 'action="/join/' + group + '/start"' in invitation
+        assert "baseline_stress" not in invitation
+        status, url, briefing = request(person, "/join/" + group + "/start", {
+            "name": "Invite " + group,
+            "consent": "yes",
+        })
+        assert "/briefing" in url
+        assert ("Соревновательный режим" in briefing) == (group == "ranking")
+        assert "baseline_stress" in briefing
+        status, url, page = request(person, "/begin", {"baseline_stress": "5"})
+        assert "/test" in url
+        assert "baseline_stress" not in page
+        names = re.findall(r'name="answer_([^"]+)" value="0"', page)
+        assert names
+        answers = {"answer_" + name: "0" for name in names}
+        answers.update({"time_" + name: "200" for name in names})
+        answers["stress"] = "6"
+        status, url, result = request(person, "/finish", answers)
+        assert "/result" in url
+        assert ("Таблица лидеров" in result) == (group == "ranking")
 
     headers = {"X-Admin-Key": ADMIN}
     status, _, dashboard = request(admin, "/admin", headers=headers)
