@@ -174,8 +174,7 @@ func (a *App) result(w http.ResponseWriter,r *http.Request) {
 func (a *App) admin(w http.ResponseWriter,r *http.Request) { a.adminDashboard(w,r) }
 
 func (a *App) export(w http.ResponseWriter,r *http.Request) {
- key:=os.Getenv("ADMIN_KEY")
- if key==""||r.Header.Get("X-Admin-Key")!=key {http.Error(w,"Forbidden",403);return}
+ if !adminRequire(w,r) {return}
  rows,err:=a.db.Query(r.Context(),`SELECT a.id,a.name,a.grp,a.started_at,a.finished_at,a.test_started_at,a.score,a.stress,a.baseline_stress,a.ranking_seen,
  COALESCE(b.question_id,''),b.choice,b.correct,b.elapsed_ms
  FROM attempts a LEFT JOIN answers b ON b.attempt_id=a.id ORDER BY a.id,b.question_id`)
