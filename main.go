@@ -23,7 +23,7 @@ type Quiz struct { ID string `json:"id"`; Title string `json:"title"`; Descripti
 type App struct { db *pgxpool.Pool; quiz Quiz; page *template.Template }
 type Attempt struct { ID int64; Name, Group string; Finished bool; Score int; TestStarted bool }
 type Row struct { Name string `json:"name"`; Score int `json:"score"`; Total int `json:"total"` }
-type PageData struct { Quiz Quiz; Attempt Attempt; Ranking []Row; Error string; Total int }
+type PageData struct { Quiz Quiz; Attempt Attempt; Ranking []Row; Error string; Total int; JoinPath string }
 
 func main() {
  b,err:=os.ReadFile("quizzes/experiment.json"); if err!=nil {log.Fatal(err)}
@@ -55,6 +55,8 @@ func main() {
  a:=&App{db:db,quiz:q,page:template.Must(template.New("page").Funcs(template.FuncMap{"add":func(a,b int)int{return a+b},"seq7":func()[]int{return []int{1,2,3,4,5,6,7}}}).Parse(htmlPage))}
  mux:=http.NewServeMux()
  mux.HandleFunc("GET /",a.home)
+ mux.HandleFunc("GET /join/{group}",a.join)
+ mux.HandleFunc("POST /join/{group}/start",a.start)
  mux.HandleFunc("POST /start",a.start)
  mux.HandleFunc("GET /briefing",a.briefing)
  mux.HandleFunc("POST /begin",a.begin)
@@ -75,16 +77,23 @@ func (a *App) render(w http.ResponseWriter,data PageData) {
 }
 func (a *App) home(w http.ResponseWriter,r *http.Request) {
  at,_:=a.current(r)
- if at.ID!=0 {if at.Finished {http.Redirect(w,r,"/result",http.StatusSeeOther)} else {http.Redirect(w,r,"/briefing",http.StatusSeeOther)};return}
- a.render(w,PageData{Quiz:a.quiz})
+ if at.ID!=0 {if at.Finished {http.Redirect(w,r,"/result",http.StatusSeeOther)} else if at.TestStarted {http.Redirect(w,r,"/test",http.StatusSeeOther)} else {http.Redirect(w,r,"/briefing",http.StatusSeeOther)};return}
+ a.render(w,PageData{Quiz:a.quiz,JoinPath:"/start"})
+}
+func (a *App) join(w http.ResponseWriter,r *http.Request) {
+ group:=r.PathValue("group")
+ if group!="ranking" && group!="control" {http.NotFound(w,r);return}
+ at,_:=a.current(r)
+ if at.ID!=0 {a.home(w,r);return}
+ a.render(w,PageData{Quiz:a.quiz,JoinPath:"/join/"+group+"/start"})
 }
 func token() (string,error) {b:=make([]byte,32);if _,err:=rand.Read(b);err!=nil{return "",err};return hex.EncodeToString(b),nil}
 func (a *App) start(w http.ResponseWriter,r *http.Request) {
  if at,_:=a.current(r);at.ID!=0 {if at.Finished {http.Redirect(w,r,"/result",303)} else if at.TestStarted {http.Redirect(w,r,"/test",303)} else {http.Redirect(w,r,"/briefing",303)};return}
  if err:=r.ParseForm();err!=nil {http.Error(w,"Bad form",400);return}
  name:=strings.TrimSpace(r.FormValue("name"))
- if len([]rune(name))<2||len([]rune(name))>60||r.FormValue("consent")!="yes" {a.render(w,PageData{Quiz:a.quiz,Error:"Введите имя (2–60 символов) и подтвердите согласие."});return}
- baseline,err:=strconv.Atoi(r.FormValue("baseline_stress"));if err!=nil||baseline<1||baseline>7 {a.render(w,PageData{Quiz:a.quiz,Error:"Оцените напряжение до теста по шкале 1–7."});return}
+ joinPath:="/start";if group:=r.PathValue("group");group=="ranking"||group=="control" {joinPath="/join/"+group+"/start"}
+ if len([]rune(name))<2||len([]rune(name))>60||r.FormValue("consent")!="yes" {a.render(w,PageData{Quiz:a.quiz,JoinPath:joinPath,Error:"Введите имя (2–60 символов) и подтвердите согласие."});return}
  t,err:=token();if err!=nil {http.Error(w,"Server error",500);return}
  ctx:=r.Context()
  tx,err:=a.db.Begin(ctx);if err!=nil {http.Error(w,"Database error",500);return}
@@ -94,12 +103,13 @@ func (a *App) start(w http.ResponseWriter,r *http.Request) {
  var nr,nc int
  err=tx.QueryRow(ctx,"SELECT count(*) FILTER (WHERE grp='ranking'), count(*) FILTER (WHERE grp='control') FROM attempts").Scan(&nr,&nc)
  if err!=nil {http.Error(w,"Database error",500);return}
- group:="ranking";if nr>nc {group="control"} else if nr==nc {var b [1]byte;if _,err=rand.Read(b[:]);err!=nil {http.Error(w,"Server error",500);return};if b[0]%2==0 {group="control"}}
- _,err=tx.Exec(ctx,"INSERT INTO attempts(token,name,grp,baseline_stress) VALUES($1,$2,$3,$4)",t,name,group,baseline)
+ group:=r.PathValue("group")
+ if group!="ranking" && group!="control" {group="ranking";if nr>nc {group="control"} else if nr==nc {var b [1]byte;if _,err=rand.Read(b[:]);err!=nil {http.Error(w,"Server error",500);return};if b[0]%2==0 {group="control"}}}
+ _,err=tx.Exec(ctx,"INSERT INTO attempts(token,name,grp) VALUES($1,$2,$3)",t,name,group)
  if err!=nil {http.Error(w,"Database error",500);return}
  if err=tx.Commit(ctx);err!=nil {http.Error(w,"Database error",500);return}
  http.SetCookie(w,&http.Cookie{Name:"experiment_session",Value:t,Path:"/",HttpOnly:true,SameSite:http.SameSiteLaxMode,Secure:r.TLS!=nil,MaxAge:86400})
- http.Redirect(w,r,"/test",http.StatusSeeOther)
+ http.Redirect(w,r,"/briefing",http.StatusSeeOther)
 }
 func (a *App) current(r *http.Request) (Attempt,error) {
  c,err:=r.Cookie("experiment_session");if err!=nil {return Attempt{},err}
@@ -116,7 +126,8 @@ func (a *App) briefing(w http.ResponseWriter,r *http.Request) {
 func (a *App) begin(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil {http.Error(w,"Unauthorized",401);return}
  if at.Finished {http.Redirect(w,r,"/result",303);return}
- if _,err=a.db.Exec(r.Context(),"UPDATE attempts SET test_started_at=COALESCE(test_started_at,now()) WHERE id=$1 AND finished_at IS NULL",at.ID);err!=nil {http.Error(w,"Database error",500);return}
+ stress,err:=strconv.Atoi(r.FormValue("baseline_stress"));if err!=nil||stress<1||stress>7 {http.Error(w,"Оцените напряжение от 1 до 7 перед началом теста",400);return}
+ if _,err=a.db.Exec(r.Context(),"UPDATE attempts SET baseline_stress=COALESCE(baseline_stress,$2),test_started_at=COALESCE(test_started_at,now()) WHERE id=$1 AND finished_at IS NULL",at.ID,stress);err!=nil {http.Error(w,"Database error",500);return}
  http.Redirect(w,r,"/test",303)
 }
 func (a *App) test(w http.ResponseWriter,r *http.Request) {
@@ -198,8 +209,8 @@ func fmtTime(v *time.Time) string {if v==nil{return ""};return v.Format(time.RFC
 const htmlPage = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#f5f7fb"><title>{{.Quiz.Title}}</title><link rel="stylesheet" href="/static/style.css"></head><body><div class="shell"><header class="top"><div class="brand"><span class="brand-mark">E</span> Experiment</div><span class="tag">Учебное исследование</span></header><main>
 {{if eq .Attempt.ID 0}}
 <section class="panel"><span class="eyebrow">Шаг 01 · Участие</span><h1>{{.Quiz.Title}}</h1><p class="lead">{{.Quiz.Description}}</p><p>Это учебное исследование способов прохождения тестов. Участие добровольное. Мы сохраним ваши ответы, время и оценки напряжения для анализа. Используйте псевдоним: в одном из условий он будет показан другим участникам после тестирования.</p>{{if .Error}}<p role="alert" class="error">{{.Error}}</p>{{end}}
-<form method="post" action="/start"><hr class="divider"><label class="field-title" for="name">Ваш псевдоним</label><input class="text-input" id="name" name="name" maxlength="60" minlength="2" required autocomplete="nickname" placeholder="Например, Студент 12">
-<hr class="divider"><h3>Какое напряжение вы испытываете прямо сейчас?</h3><p class="muted">Оцените своё состояние до начала теста.</p><div class="scale" role="group" aria-label="Напряжение до теста от 1 до 7">{{range seq7}}<label><input type="radio" name="baseline_stress" value="{{.}}" required><span>{{.}}</span></label>{{end}}</div><div class="scale-ends"><span>1 · Совсем нет</span><span>7 · Очень сильное</span></div>
+<form method="post" action="{{.JoinPath}}"><hr class="divider"><label class="field-title" for="name">Ваш псевдоним</label><input class="text-input" id="name" name="name" maxlength="60" minlength="2" required autocomplete="nickname" placeholder="Например, Студент 12">
+
 <label class="consent"><input type="checkbox" name="consent" value="yes" required><span>Я добровольно соглашаюсь участвовать и разрешаю сохранить мои ответы и оценки для учебного анализа.</span></label><div class="actions"><button class="btn" type="submit">Продолжить →</button></div></form></section>
 {{else if .Attempt.Finished}}
 <section class="panel"><span class="eyebrow">Тест завершён</span><h1>Спасибо за участие!</h1><p>Ваши ответы сохранены. Спасибо, {{.Attempt.Name}}.</p><div class="results"><div class="score">{{.Attempt.Score}} <small>/ {{.Total}}</small></div><p>Правильных ответов<br><strong>Ваш итоговый результат</strong></p></div>
@@ -207,7 +218,7 @@ const htmlPage = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><me
 {{else if eq .Total -1}}
 <section class="panel"><span class="eyebrow">Шаг 02 · Инструкция</span><h1>Перед началом теста</h1>
 {{if eq .Attempt.Group "ranking"}}<div class="note"><h2>Соревновательный режим</h2><p><strong>Вы соревнуетесь с другими студентами.</strong> Ваш результат войдёт в общую таблицу лидеров. После завершения теста вы увидите своё место среди остальных участников.</p></div>{{else}}<p class="lead">Вам предстоит ответить на вопросы теста. Ваш личный результат будет показан после завершения.</p>{{end}}
-<hr class="divider"><p>Отвечайте самостоятельно. После нажатия кнопки начнётся отсчёт времени выполнения заданий.</p><form action="/begin" method="post"><div class="actions"><button class="btn" type="submit">Начать отвечать →</button></div></form></section>
+<hr class="divider"><p>Отвечайте самостоятельно. После нажатия кнопки начнётся отсчёт времени выполнения заданий.</p><form action="/begin" method="post"><h3>Какое напряжение вы испытываете сейчас?</h3><p class="muted">Оцените своё состояние после прочтения инструкции, но до начала вопросов.</p><div class="scale" role="group" aria-label="Напряжение перед тестом от 1 до 7">{{range seq7}}<label><input type="radio" name="baseline_stress" value="{{.}}" required><span>{{.}}</span></label>{{end}}</div><div class="scale-ends"><span>1 · Совсем нет</span><span>7 · Очень сильное</span></div><div class="actions"><button class="btn" type="submit">Начать отвечать →</button></div></form></section>
 {{else}}
 <div class="quiz-top"><div><span class="eyebrow">Шаг 03 · Вопросы</span><h1>{{.Quiz.Title}}</h1></div><span class="tag"><span id="answered">0</span> / {{.Total}} ответов</span></div><div class="progress" role="progressbar" aria-label="Прогресс теста" aria-valuemin="0" aria-valuemax="{{.Total}}" aria-valuenow="0" id="progress"><div id="progressFill"></div></div><p>{{.Quiz.Description}}</p>
 <form id="quizForm" method="post" action="/finish">{{range $i,$q:=.Quiz.Questions}}<fieldset class="question" data-q="{{$q.ID}}"><legend class="question-num">Вопрос {{add $i 1}}</legend><h3>{{$q.Text}}</h3>{{range $j,$option:=$q.Options}}<label class="option"><input type="radio" name="answer_{{$q.ID}}" value="{{$j}}" required><span>{{$option}}</span></label>{{end}}<input type="hidden" name="time_{{$q.ID}}" value="0"></fieldset>{{end}}
