@@ -120,7 +120,12 @@ def run():
         })
         assert "/briefing" in url
         assert ("Соревновательный режим" in briefing) == (group == "ranking")
-    expect_forbidden(admin, "/join/ranking")
+    try:
+        request(admin, "/join/ranking")
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 404
+    else:
+        raise AssertionError("Unsigned group link should be rejected")
 
     # 60 registrations must produce exactly 30 assignments per condition.
     # The first two users above already occupy one place in each group.
