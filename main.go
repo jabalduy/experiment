@@ -201,16 +201,18 @@ func (a *App) finish(w http.ResponseWriter,r *http.Request) {
  if at.Finished {http.Redirect(w,r,"/result",303);return}
  if !at.TestStarted {http.Error(w,"Test not started",409);return}
  if err=r.ParseForm();err!=nil {http.Error(w,"Invalid form",400);return}
+ var expired bool
+ if err=a.db.QueryRow(r.Context(),"SELECT clock_timestamp() >= test_started_at + interval '10 minutes' FROM attempts WHERE id=$1",at.ID).Scan(&expired);err!=nil {http.Error(w,"Database error",500);return}
  type answer struct {id,raw string;choice,elapsed int;correct bool}
  items:=make([]answer,0,len(a.quiz.Questions));score:=0
  for _,q:=range a.quiz.Questions {
   v:=r.FormValue("answer_"+q.ID);choice:=-1;good:=false
   if q.Input!="" {
-   if strings.TrimSpace(v)=="" {http.Error(w,"Ответьте на все пять заданий",400);return}
+   if strings.TrimSpace(v)==""&&!expired {http.Error(w,"Ответьте на все пять заданий",400);return}
    normalized:=strings.TrimSpace(v)
    if q.Input=="letter" {normalized=strings.ToUpper(normalized)}
    if normalized!="" {good=normalized==q.Answer}
-  } else {if v=="" {http.Error(w,"Ответьте на все пять заданий",400);return};n,e:=strconv.Atoi(v);if e!=nil||n<0||n>=len(q.Options) {http.Error(w,"Некорректный ответ",400);return};choice=n;good=choice==q.Correct}
+  } else {if v=="" {if !expired {http.Error(w,"Ответьте на все пять заданий",400);return}} else {n,e:=strconv.Atoi(v);if e!=nil||n<0||n>=len(q.Options) {http.Error(w,"Некорректный ответ",400);return};choice=n;good=choice==q.Correct}}
   ms,_:=strconv.Atoi(r.FormValue("time_"+q.ID));if ms<0||ms>3600000 {ms=0}
   if good {score++}
   items=append(items,answer{q.ID,v,choice,ms,good})
