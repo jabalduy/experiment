@@ -191,22 +191,23 @@ func (a *App) admin(w http.ResponseWriter,r *http.Request) { a.adminDashboard(w,
 
 func (a *App) export(w http.ResponseWriter,r *http.Request) {
  if !adminRequire(w,r) {return}
- rows,err:=a.db.Query(r.Context(),`SELECT a.id,a.name,a.grp,a.started_at,a.finished_at,a.test_started_at,a.score,a.stress,a.baseline_stress,a.ranking_seen,
+ rows,err:=a.db.Query(r.Context(),`SELECT a.id,a.name,a.grp,a.started_at,a.finished_at,a.test_started_at,a.score,a.post_score,a.pre_score,a.ranking_seen,a.pre_answers::text,a.post_answers::text,
  COALESCE(b.question_id,''),b.choice,b.correct,b.elapsed_ms
  FROM attempts a LEFT JOIN answers b ON b.attempt_id=a.id ORDER BY a.id,b.question_id`)
  if err!=nil {http.Error(w,"Database error",500);return};defer rows.Close()
  w.Header().Set("Content-Type","text/csv; charset=utf-8");w.Header().Set("Content-Disposition","attachment; filename=experiment.csv")
  writer:=csv.NewWriter(w);defer writer.Flush()
- writer.Write([]string{"attempt_id","name","group","registered_at","finished_at","test_started_at","score","stress_1_7","baseline_stress_1_7","ranking_seen","question_id","choice_index","correct","elapsed_ms"})
+ writer.Write([]string{"attempt_id","name","group","registered_at","finished_at","test_started_at","score","post_anxiety_20_80","pre_anxiety_20_80","ranking_seen","pre_answers_1_4","post_answers_1_4","question_id","choice_index","correct","elapsed_ms"})
  for rows.Next() {
-  var id int64;var name,group,start,qid string;var end,testStarted *time.Time;var score,stress,baseline,choice,elapsed *int;var correct *bool;var rankingSeen bool
+  var id int64;var name,group,start,qid string;var end,testStarted *time.Time;var score,stress,baseline,choice,elapsed *int;var correct *bool;var rankingSeen bool;var preAnswers,postAnswers *string
   var started time.Time
-  if err=rows.Scan(&id,&name,&group,&started,&end,&testStarted,&score,&stress,&baseline,&rankingSeen,&qid,&choice,&correct,&elapsed);err!=nil {log.Println(err);return}
+  if err=rows.Scan(&id,&name,&group,&started,&end,&testStarted,&score,&stress,&baseline,&rankingSeen,&preAnswers,&postAnswers,&qid,&choice,&correct,&elapsed);err!=nil {log.Println(err);return}
   start=started.Format(time.RFC3339)
-  writer.Write([]string{fmt.Sprint(id),name,group,start,fmtTime(end),fmtTime(testStarted),fmtPtr(score),fmtPtr(stress),fmtPtr(baseline),strconv.FormatBool(rankingSeen),qid,fmtPtr(choice),fmtBool(correct),fmtPtr(elapsed)})
+  writer.Write([]string{fmt.Sprint(id),name,group,start,fmtTime(end),fmtTime(testStarted),fmtPtr(score),fmtPtr(stress),fmtPtr(baseline),strconv.FormatBool(rankingSeen),fmtStr(preAnswers),fmtStr(postAnswers),qid,fmtPtr(choice),fmtBool(correct),fmtPtr(elapsed)})
  }
  if err=rows.Err();err!=nil {log.Println(err)}
 }
+func fmtStr(v *string) string {if v==nil{return ""};return *v}
 func fmtPtr(v *int) string {if v==nil{return ""};return strconv.Itoa(*v)}
 func fmtBool(v *bool) string {if v==nil{return ""};return strconv.FormatBool(*v)}
 func fmtTime(v *time.Time) string {if v==nil{return ""};return v.Format(time.RFC3339)}
