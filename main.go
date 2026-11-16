@@ -56,7 +56,6 @@ func main() {
  mux:=http.NewServeMux()
  mux.HandleFunc("GET /",a.home)
  mux.HandleFunc("GET /join/{group}",a.join)
- mux.HandleFunc("POST /join/{group}/start",a.start)
  mux.HandleFunc("POST /start",a.start)
  mux.HandleFunc("GET /briefing",a.briefing)
  mux.HandleFunc("POST /begin",a.begin)
@@ -81,18 +80,17 @@ func (a *App) home(w http.ResponseWriter,r *http.Request) {
  a.render(w,PageData{Quiz:a.quiz,JoinPath:"/start"})
 }
 func (a *App) join(w http.ResponseWriter,r *http.Request) {
+ // Legacy invitation URLs must never bypass randomized assignment.
  group:=r.PathValue("group")
  if group!="ranking" && group!="control" {http.NotFound(w,r);return}
- at,_:=a.current(r)
- if at.ID!=0 {a.home(w,r);return}
- a.render(w,PageData{Quiz:a.quiz,JoinPath:"/join/"+group+"/start"})
+ http.Redirect(w,r,"/",http.StatusSeeOther)
 }
 func token() (string,error) {b:=make([]byte,32);if _,err:=rand.Read(b);err!=nil{return "",err};return hex.EncodeToString(b),nil}
 func (a *App) start(w http.ResponseWriter,r *http.Request) {
  if at,_:=a.current(r);at.ID!=0 {if at.Finished {http.Redirect(w,r,"/result",303)} else if at.TestStarted {http.Redirect(w,r,"/test",303)} else {http.Redirect(w,r,"/briefing",303)};return}
  if err:=r.ParseForm();err!=nil {http.Error(w,"Bad form",400);return}
  name:=strings.TrimSpace(r.FormValue("name"))
- joinPath:="/start";if group:=r.PathValue("group");group=="ranking"||group=="control" {joinPath="/join/"+group+"/start"}
+ joinPath:="/start"
  if len([]rune(name))<2||len([]rune(name))>60||r.FormValue("consent")!="yes" {a.render(w,PageData{Quiz:a.quiz,JoinPath:joinPath,Error:"Введите имя (2–60 символов) и подтвердите согласие."});return}
  t,err:=token();if err!=nil {http.Error(w,"Server error",500);return}
  ctx:=r.Context()
@@ -103,8 +101,8 @@ func (a *App) start(w http.ResponseWriter,r *http.Request) {
  var nr,nc int
  err=tx.QueryRow(ctx,"SELECT count(*) FILTER (WHERE grp='ranking'), count(*) FILTER (WHERE grp='control') FROM attempts").Scan(&nr,&nc)
  if err!=nil {http.Error(w,"Database error",500);return}
- group:=r.PathValue("group")
- if group!="ranking" && group!="control" {group="ranking";if nr>nc {group="control"} else if nr==nc {var b [1]byte;if _,err=rand.Read(b[:]);err!=nil {http.Error(w,"Server error",500);return};if b[0]%2==0 {group="control"}}}
+ group:="ranking"
+ if nr>nc {group="control"} else if nr==nc {var b [1]byte;if _,err=rand.Read(b[:]);err!=nil {http.Error(w,"Server error",500);return};if b[0]%2==0 {group="control"}}
  _,err=tx.Exec(ctx,"INSERT INTO attempts(token,name,grp) VALUES($1,$2,$3)",t,name,group)
  if err!=nil {http.Error(w,"Database error",500);return}
  if err=tx.Commit(ctx);err!=nil {http.Error(w,"Database error",500);return}
