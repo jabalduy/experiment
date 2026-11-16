@@ -2,6 +2,9 @@ package main
 
 import (
  "context"
+ "encoding/json"
+ "strconv"
+ "strings"
  "crypto/subtle"
  "fmt"
  "html/template"
@@ -17,7 +20,7 @@ type adminGroup struct {
  AvgScore, AvgBefore, AvgAfter, AvgChange, AvgSeconds float64
 }
 type adminQuestion struct { ID, Label string; RankingCorrect,RankingTotal,ControlCorrect,ControlTotal int }
-type adminParticipant struct { ID int64; Name,Group,Source string; Started,Finished string; Score,Before,After string; Seconds string }
+type adminParticipant struct { ID int64; Name,Group,Source string; Started,Finished string; Score,Before,After string; Seconds,Answers string }
 
 func adminAuthorized(r *http.Request) bool {
  expected:=os.Getenv("ADMIN_KEY")
@@ -68,8 +71,8 @@ func (a *App) adminDashboard(w http.ResponseWriter,r *http.Request) {
  for _,q:=range questions {
   fmt.Fprintf(w,"<tr><td>%s</td><td>%s</td><td>%s</td></tr>",template.HTMLEscapeString(q.Label),percent(q.RankingCorrect,q.RankingTotal),percent(q.ControlCorrect,q.ControlTotal))
  }
- fmt.Fprint(w,`</tbody></table></div></section><section class="card"><h2>Участники (последние 200)</h2><p>Псевдонимы отображаются только в административной панели.</p><div class="scroll"><table><thead><tr><th>ID</th><th>Псевдоним</th><th>Группа</th><th>Назначение</th><th>Баллы</th><th>До</th><th>После</th><th>Время, с</th><th>Статус</th></tr></thead><tbody>`)
- for _,p:=range people {fmt.Fprintf(w,"<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",p.ID,template.HTMLEscapeString(p.Name),template.HTMLEscapeString(groupLabel(p.Group)),template.HTMLEscapeString(p.Source),p.Score,p.Before,p.After,p.Seconds,p.Finished)}
+ fmt.Fprint(w,`</tbody></table></div></section><section class="card"><h2>Участники (последние 200)</h2><p>Псевдонимы отображаются только в административной панели.</p><div class="scroll"><table><thead><tr><th>ID</th><th>Псевдоним</th><th>Группа</th><th>Назначение</th><th>Баллы</th><th>Ответы (1–5)</th><th>До</th><th>После</th><th>Время, с</th><th>Статус</th></tr></thead><tbody>`)
+ for _,p:=range people {fmt.Fprintf(w,"<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",p.ID,template.HTMLEscapeString(p.Name),template.HTMLEscapeString(groupLabel(p.Group)),template.HTMLEscapeString(p.Source),p.Score,template.HTMLEscapeString(p.Answers),p.Before,p.After,p.Seconds,p.Finished)}
  fmt.Fprint(w,`</tbody></table></div></section><section class="card"><h2>Экспорт</h2><p>CSV со всеми попытками и ответами: <code>/admin/export</code>. Для скачивания используйте заголовок <code>X-Admin-Key</code> либо Basic Auth с паролем ADMIN_KEY. Доступ не предоставляется по ссылке с ключом в URL.</p></section><p>Различия средних не доказывают причинный эффект или статистическую значимость.</p></main></body></html>`)
 }
 func groupLabel(g string) string {if g=="ranking" {return "Соревнование"};if g=="control" {return "Контроль"};return g}
@@ -104,13 +107,15 @@ func (a *App) adminQuestions(ctx context.Context)([]adminQuestion,error) {
 }
 func (a *App) adminParticipants(ctx context.Context)([]adminParticipant,error) {
  rows,err:=a.db.Query(ctx,`SELECT id,name,grp,assignment_source,finished_at IS NOT NULL,score,pre_score,post_score,
- CASE WHEN finished_at IS NOT NULL AND test_started_at IS NOT NULL THEN extract(epoch from finished_at-test_started_at)::float8 END
+ CASE WHEN finished_at IS NOT NULL AND test_started_at IS NOT NULL THEN extract(epoch from finished_at-test_started_at)::float8 END,
+ (SELECT jsonb_object_agg(b.question_id,jsonb_build_object('choice',b.choice,'raw',b.raw_answer)) FROM answers b WHERE b.attempt_id=attempts.id)::text
  FROM attempts ORDER BY id DESC LIMIT 200`)
  if err!=nil{return nil,err};defer rows.Close()
  out:=[]adminParticipant{}
- for rows.Next(){var p adminParticipant;var done bool;var score,before,after *int;var duration *float64
- if err=rows.Scan(&p.ID,&p.Name,&p.Group,&p.Source,&done,&score,&before,&after,&duration);err!=nil{return nil,err}
+ for rows.Next(){var p adminParticipant;var done bool;var score,before,after *int;var duration *float64;var answerJSON *string
+ if err=rows.Scan(&p.ID,&p.Name,&p.Group,&p.Source,&done,&score,&before,&after,&duration,&answerJSON);err!=nil{return nil,err}
  if p.Source=="manual" {p.Source="Вручную"} else {p.Source="Случайно"}
+ p.Answers="—";if answerJSON!=nil {var responses map[string]struct{Choice int `json:"choice"`;Raw *string `json:"raw"`};if json.Unmarshal([]byte(*answerJSON),&responses)==nil {parts:=make([]string,0,len(a.quiz.Questions));for i,q:=range a.quiz.Questions {value:="—";if response,ok:=responses[q.ID];ok {if response.Raw!=nil {value=strings.TrimSpace(*response.Raw)} else if q.Input==""&&response.Choice>=0&&response.Choice<len(q.Options) {value=q.Options[response.Choice]} else if q.Input!="" {value="(старый ответ не сохранён)"};if value=="" {value="—"}};parts=append(parts,strconv.Itoa(i+1)+": "+value)};p.Answers=strings.Join(parts," · ")}}
  p.Score="—";p.Before="—";p.After="—";p.Seconds="—";p.Finished="Не завершён"
  if before!=nil {p.Before=fmt.Sprint(*before)}
  if score!=nil {p.Score=fmt.Sprint(*score)}
