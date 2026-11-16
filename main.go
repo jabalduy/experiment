@@ -88,7 +88,7 @@ func (a *App) render(w http.ResponseWriter,data PageData) {
 }
 func (a *App) home(w http.ResponseWriter,r *http.Request) {
  at,_:=a.current(r)
- if at.ID!=0 {if at.Finished {http.Redirect(w,r,"/result",http.StatusSeeOther)} else if at.TestStarted {http.Redirect(w,r,"/test",http.StatusSeeOther)} else if at.Ready {http.Redirect(w,r,"/ready",http.StatusSeeOther)} else {http.Redirect(w,r,"/briefing",http.StatusSeeOther)};return}
+ if at.ID!=0 {if at.Finished {http.Redirect(w,r,"/result",http.StatusSeeOther)} else if at.TestStarted {http.Redirect(w,r,"/test",http.StatusSeeOther)} else if at.Named {http.Redirect(w,r,"/test",http.StatusSeeOther)} else {http.Redirect(w,r,"/briefing",http.StatusSeeOther)};return}
  a.render(w,PageData{Quiz:a.quiz,JoinPath:"/start"})
 }
 func invitationKey(group string) string {
@@ -113,7 +113,7 @@ func (a *App) join(w http.ResponseWriter,r *http.Request) {
 }
 func token() (string,error) {b:=make([]byte,32);if _,err:=rand.Read(b);err!=nil{return "",err};return hex.EncodeToString(b),nil}
 func (a *App) start(w http.ResponseWriter,r *http.Request) {
- if at,_:=a.current(r);at.ID!=0 {if at.Finished {http.Redirect(w,r,"/result",303)} else if at.TestStarted {http.Redirect(w,r,"/test",303)} else if at.Ready {http.Redirect(w,r,"/ready",303)} else {http.Redirect(w,r,"/briefing",303)};return}
+ if at,_:=a.current(r);at.ID!=0 {if at.Finished {http.Redirect(w,r,"/result",303)} else if at.TestStarted {http.Redirect(w,r,"/test",303)} else if at.Named {http.Redirect(w,r,"/test",303)} else {http.Redirect(w,r,"/briefing",303)};return}
  if err:=r.ParseForm();err!=nil {http.Error(w,"Bad form",400);return}
  name:="Участник"
  joinPath:="/start"
@@ -156,7 +156,7 @@ func (a *App) briefing(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil {http.Redirect(w,r,"/",303);return}
  if at.Finished {http.Redirect(w,r,"/result",303);return}
  if at.TestStarted {http.Redirect(w,r,"/test",303);return}
- if at.Named {http.Redirect(w,r,"/ready",303);return}
+ if at.Named {http.Redirect(w,r,"/test",303);return}
  a.render(w,PageData{Quiz:a.quiz,Attempt:at,Total:-1})
 }
 func (a *App) begin(w http.ResponseWriter,r *http.Request) {
@@ -169,13 +169,13 @@ func (a *App) saveName(w http.ResponseWriter,r *http.Request) {
  if at.Finished {http.Redirect(w,r,"/result",303);return}
  name:=strings.TrimSpace(r.FormValue("name"))
  if len([]rune(name))<1||len([]rune(name))>40||strings.ContainsAny(name," \t\n") {http.Error(w,"Введите только имя без пробелов и фамилии",400);return}
- if _,err=a.db.Exec(r.Context(),"UPDATE attempts SET name=$2,name_set=TRUE,ready_at=COALESCE(ready_at,clock_timestamp()) WHERE id=$1 AND name_set=FALSE AND finished_at IS NULL",at.ID,name);err!=nil {http.Error(w,"Database error",500);return}
- http.Redirect(w,r,"/ready",303)
+ if _,err=a.db.Exec(r.Context(),"UPDATE attempts SET name=$2,name_set=TRUE,ready_at=COALESCE(ready_at,clock_timestamp()),test_started_at=COALESCE(test_started_at,clock_timestamp()) WHERE id=$1 AND name_set=FALSE AND finished_at IS NULL",at.ID,name);err!=nil {http.Error(w,"Database error",500);return}
+ http.Redirect(w,r,"/test",303)
 }
 func (a *App) namePage(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil {http.Redirect(w,r,"/",303);return}
  if at.Finished {http.Redirect(w,r,"/result",303);return}
- if at.Named {http.Redirect(w,r,"/ready",303);return}
+ if at.Named {http.Redirect(w,r,"/test",303);return}
  a.render(w,PageData{Quiz:a.quiz,Attempt:at,Total:-5})
 }
 func (a *App) ready(w http.ResponseWriter,r *http.Request) {
@@ -298,7 +298,7 @@ const htmlPage = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><me
 {{else if eq .Total -1}}
 <section class="panel"><span class="eyebrow">Шаг 02 · Инструкция</span><h1>Перед началом</h1>
 {{if eq .Attempt.Group "ranking"}}<div class="note"><p>Вам предстоит выполнить 5 заданий за ограниченное время. Ваш результат будет сопоставлен с результатами других участников. После выполнения задания вы сможете ознакомиться с распределением результатов между всеми участниками в рейтинге. Постарайтесь выполнить задания как можно точнее.</p></div>{{else}}<div class="note"><p>Вам предстоит выполнить 5 заданий за ограниченное время. Вы увидите свой результат после выполнения заданий, и он будет использован только в рамках исследования. Постарайтесь выполнить задания как можно точнее.</p></div>{{end}}
-<p>Время на задания — <strong>10 минут</strong>.</p><form action="/begin" method="post"><div class="actions"><button class="btn" type="submit">Продолжить →</button></div></form></section>
+<p>Время на задания — <strong>10 минут</strong>.</p><p>Вам предстоит выполнить 5 заданий на логическое мышление и поиск закономерностей.</p><p>Пожалуйста, выполняйте задания самостоятельно, без использования искусственного интеллекта, поисковых систем и помощи других людей.</p><p>При необходимости можно пользоваться бумагой и ручкой для записей и вычислений.</p><p>Если задание покажется сложным, постарайтесь найти решение самостоятельно.</p><p><strong>Желаем удачи!</strong></p><form action="/begin" method="post"><div class="actions"><button class="btn" type="submit">Продолжить →</button></div></form></section>
 {{else if eq .Total -5}}
 <section class="panel"><span class="eyebrow">Шаг 03 · Имя участника</span><h1>Как вас зовут?</h1><form method="post" action="/name" data-complete-form="name"><label class="field-title" for="name">Введите, пожалуйста, своё имя</label><input class="text-input" id="name" name="name" maxlength="40" required autocomplete="given-name" placeholder="Ваше имя"><p class="muted">Только имя, без фамилии. В соревновательной группе оно будет видно в рейтинге после теста.</p><div class="actions"><button class="btn" type="submit">Продолжить →</button></div></form></section>
 {{else if eq .Total -4}}
