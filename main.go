@@ -66,6 +66,7 @@ func main() {
  mux.HandleFunc("POST /begin",a.begin)
  mux.HandleFunc("GET /ready",a.ready)
  mux.HandleFunc("POST /launch",a.launch)
+ mux.HandleFunc("POST /api/start-clock",a.startClock)
  mux.HandleFunc("GET /test",a.test)
  mux.HandleFunc("POST /finish",a.finish)
  mux.HandleFunc("GET /result",a.result)
@@ -173,17 +174,26 @@ func (a *App) ready(w http.ResponseWriter,r *http.Request) {
 func (a *App) launch(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil {http.Error(w,"Unauthorized",401);return}
  if !at.Ready {http.Redirect(w,r,"/briefing",303);return}
- if !at.Finished {if _,err=a.db.Exec(r.Context(),"UPDATE attempts SET test_started_at=COALESCE(test_started_at,now()) WHERE id=$1 AND ready_at IS NOT NULL AND finished_at IS NULL",at.ID);err!=nil {http.Error(w,"Database error",500);return}}
  http.Redirect(w,r,"/test",303)
+}
+func (a *App) startClock(w http.ResponseWriter,r *http.Request) {
+ at,err:=a.current(r);if err!=nil {http.Error(w,"Unauthorized",401);return}
+ if !at.Ready||at.Finished {http.Error(w,"Test unavailable",409);return}
+ var deadline int64
+ err=a.db.QueryRow(r.Context(),`UPDATE attempts SET test_started_at=COALESCE(test_started_at,clock_timestamp()) WHERE id=$1 AND ready_at IS NOT NULL AND finished_at IS NULL RETURNING (extract(epoch from test_started_at+interval '10 minutes')*1000)::bigint`,at.ID).Scan(&deadline)
+ if err!=nil {http.Error(w,"Database error",500);return}
+ w.Header().Set("Cache-Control","no-store")
+ w.Header().Set("Content-Type","application/json")
+ fmt.Fprintf(w,`{"deadline":%d,"serverNow":%d}`,deadline,time.Now().UnixMilli())
 }
 func (a *App) test(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil {http.Redirect(w,r,"/",303);return}
  if at.Finished {http.Redirect(w,r,"/result",303);return}
- if !at.TestStarted {if at.Ready {http.Redirect(w,r,"/ready",303)} else {http.Redirect(w,r,"/briefing",303)};return}
+ if !at.Ready {http.Redirect(w,r,"/briefing",303);return}
  // Copy questions without correct answer indices to avoid exposing answer keys.
  q:=a.quiz;q.Questions=append([]Question(nil),q.Questions...)
  for i:=range q.Questions {q.Questions[i].Correct=-1;q.Questions[i].Answer=""}
- if err=a.db.QueryRow(r.Context(),"SELECT (extract(epoch from test_started_at+interval '10 minutes')*1000)::bigint FROM attempts WHERE id=$1",at.ID).Scan(&at.DeadlineUnix);err!=nil {http.Error(w,"Database error",500);return}
+ 
  a.render(w,PageData{Quiz:q,Attempt:at,Total:len(q.Questions)})
 }
 func (a *App) finish(w http.ResponseWriter,r *http.Request) {
@@ -280,7 +290,7 @@ const htmlPage = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><me
 {{if eq .Attempt.Group "ranking"}}<div class="note"><h2>Соревновательный режим</h2><p>Вам предстоит выполнить 5 заданий за ограниченное время. Ваш результат будет сопоставлен с результатами других участников. После выполнения задания вы сможете ознакомиться с распределением результатов между всеми участниками в рейтинге. Постарайтесь выполнить задания как можно точнее.</p></div>{{else}}<div class="note"><p>Вам предстоит выполнить 5 заданий за ограниченное время. Вы увидите свой результат после выполнения заданий, и он будет использован только в рамках исследования. Постарайтесь выполнить задания как можно точнее.</p></div>{{end}}
 <p>Время на задания — <strong>10 минут</strong>.</p><hr class="divider"><h2>Оценка текущего состояния</h2><div class="survey-intro"><p>Теперь, пожалуйста, оцените представленные ниже утверждения, опираясь на то, как вы чувствуете себя в данный момент.</p><p>Для каждого утверждения выберите один из четырёх вариантов ответа:</p><p><strong>1</strong> — Нет, это не так<br><strong>2</strong> — Пожалуй, так<br><strong>3</strong> — Верно<br><strong>4</strong> — Совершенно верно</p><p>Пожалуйста, отвечайте искренне, ориентируясь на своё текущее состояние.</p></div><form action="/begin" method="post"><div class="survey-list">{{range $i,$item:=.SurveyItems}}<fieldset class="survey-item"><legend><strong>{{add $i 1}}.</strong> {{$item}}</legend><div class="scale four">{{range seq4}}<label><input type="radio" name="pre_{{add $i 1}}" value="{{.}}" required><span>{{.}}</span></label>{{end}}</div></fieldset>{{end}}</div><div class="actions"><button class="btn" type="submit">Продолжить →</button></div></form></section>
 {{else if eq .Total -4}}
-<section class="panel"><span class="eyebrow">Шаг 03 · Перед заданиями</span><h1>Перед началом таймера</h1><p>Вам предстоит выполнить 5 заданий на логическое мышление и поиск закономерностей.</p><p>Пожалуйста, выполняйте задания самостоятельно, без использования искусственного интеллекта, поисковых систем и помощи других людей.</p><p>При необходимости можно пользоваться бумагой и ручкой для записей и вычислений.</p><p>Если задание покажется сложным, постарайтесь найти решение самостоятельно.</p><p><strong>Желаем удачи!</strong></p><p>На выполнение отводится ровно 10 минут. Отсчёт начнётся после нажатия кнопки.</p><form method="post" action="/launch"><div class="actions"><button class="btn" type="submit">Начать задания →</button></div></form></section>
+<section class="panel"><span class="eyebrow">Шаг 03 · Перед заданиями</span><h1>Перед началом таймера</h1><p>Вам предстоит выполнить 5 заданий на логическое мышление и поиск закономерностей.</p><p>Пожалуйста, выполняйте задания самостоятельно, без использования искусственного интеллекта, поисковых систем и помощи других людей.</p><p>При необходимости можно пользоваться бумагой и ручкой для записей и вычислений.</p><p>Если задание покажется сложным, постарайтесь найти решение самостоятельно.</p><p><strong>Желаем удачи!</strong></p><form method="post" action="/launch"><div class="actions"><button class="btn" type="submit">Начать задания →</button></div></form></section>
 {{else}}
 <div class="quiz-top"><div><span class="eyebrow">Шаг 03 · Задания</span><h1>Логические задачи</h1></div><span class="tag"><span id="answered">0</span> / {{.Total}} ответов</span></div>
 <section class="panel"><div class="timer" id="timer" role="timer" aria-live="off">10:00</div><p class="muted">Через 10 минут ответы отправятся автоматически. Если не знаете ответ, можно оставить вопрос пустым.</p></section>
