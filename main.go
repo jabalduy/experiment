@@ -151,7 +151,7 @@ func (a *App) finish(w http.ResponseWriter,r *http.Request) {
  items:=make([]answer,0,len(a.quiz.Questions));score:=0
  for _,q:=range a.quiz.Questions {
   v:=r.FormValue("answer_"+q.ID);choice,e:=strconv.Atoi(v)
-  if e!=nil||choice<0||choice>=len(q.Options) {http.Error(w,"Ответьте на все вопросы",400);return}
+  if v=="" {choice=-1} else if e!=nil||choice<0||choice>=len(q.Options) {http.Error(w,"Некорректный ответ",400);return}
   ms,_:=strconv.Atoi(r.FormValue("time_"+q.ID));if ms<0||ms>3600000 {ms=0}
   good:=choice==q.Correct;if good {score++}
   items=append(items,answer{q.ID,choice,ms,good})
