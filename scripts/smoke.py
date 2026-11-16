@@ -75,6 +75,8 @@ def run():
         assert "/ready" in url and "quizForm" not in page and "Начать задания" in page
         status, url, page = request(person, "/launch", {})
         assert "/test" in url and "quizForm" in page
+        status, _, clock = request(person, "/api/start-clock", {})
+        assert status == 200 and "deadline" in clock
         assert "Таблица лидеров" not in page
         assert "Соревновательный режим" not in page
 
@@ -153,6 +155,7 @@ def run():
     status, _, dashboard = request(admin, "/admin", headers=headers)
     assert status == 200 and "Pilot1" in dashboard and "Pilot2" in dashboard
     assert "Сравнение групп" in dashboard
+    assert "<th>Задание 1</th>" in dashboard and "<th>Задание 5</th>" in dashboard
     status, _, csv = request(admin, "/admin/export", headers=headers)
     assert status == 200 and "pre_answers_1_4" in csv and "Pilot1" in csv
     print("PASS: 60 balanced random assignments, briefing, test, result, ranking, admin and CSV")
