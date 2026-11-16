@@ -23,7 +23,7 @@ import (
 type Question struct { ID string `json:"id"`; Text string `json:"text"`; Options []string `json:"options"`; Input string `json:"input,omitempty"`; Answer string `json:"answer,omitempty"`; Correct int `json:"correct"` }
 type Quiz struct { ID string `json:"id"`; Title string `json:"title"`; Description string `json:"description"`; Questions []Question `json:"questions"` }
 type App struct { db *pgxpool.Pool; quiz Quiz; page *template.Template }
-type Attempt struct { ID int64; Name, Group string; Finished bool; Score int; TestStarted bool; Ready bool; DeadlineUnix int64; ServerNowUnix int64 }
+type Attempt struct { ID int64; Name, Group string; Finished bool; Score int; TestStarted bool; Ready bool; Named bool; DeadlineUnix int64; ServerNowUnix int64 }
 type Row struct { Name string `json:"name"`; Score int `json:"score"`; Total int `json:"total"` }
 type PageData struct { Quiz Quiz; Attempt Attempt; Ranking []Row; Error string; Total int; JoinPath string; InviteGroup string; InviteKey string; SurveyItems []string; SurveyMode string; SurveyError string; SurveyDone bool }
 
@@ -48,7 +48,7 @@ func main() {
  test_started_at TIMESTAMPTZ,
  ready_at TIMESTAMPTZ,
  pre_answers JSONB,post_answers JSONB,pre_score INT,post_score INT,
- assignment_source TEXT NOT NULL DEFAULT 'random'
+ assignment_source TEXT NOT NULL DEFAULT 'random', name_set BOOLEAN NOT NULL DEFAULT TRUE
  );
  CREATE TABLE IF NOT EXISTS answers (
  attempt_id BIGINT NOT NULL REFERENCES attempts(id),
@@ -56,7 +56,7 @@ func main() {
  elapsed_ms INT NOT NULL DEFAULT 0, PRIMARY KEY(attempt_id,question_id)
  );`
  if _,err=db.Exec(ctx,schema);err!=nil {log.Fatal(err)}
- if _,err=db.Exec(ctx,`ALTER TABLE answers ADD COLUMN IF NOT EXISTS raw_answer TEXT; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS baseline_stress INT CHECK(baseline_stress BETWEEN 1 AND 7); ALTER TABLE attempts ADD COLUMN IF NOT EXISTS ranking_seen BOOLEAN NOT NULL DEFAULT FALSE; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS test_started_at TIMESTAMPTZ; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS ready_at TIMESTAMPTZ; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS pre_answers JSONB; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS post_answers JSONB; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS pre_score INT; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS post_score INT; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS assignment_source TEXT NOT NULL DEFAULT 'random'`);err!=nil {log.Fatal(err)}
+ if _,err=db.Exec(ctx,`ALTER TABLE attempts ADD COLUMN IF NOT EXISTS name_set BOOLEAN NOT NULL DEFAULT TRUE; ALTER TABLE answers ADD COLUMN IF NOT EXISTS raw_answer TEXT; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS baseline_stress INT CHECK(baseline_stress BETWEEN 1 AND 7); ALTER TABLE attempts ADD COLUMN IF NOT EXISTS ranking_seen BOOLEAN NOT NULL DEFAULT FALSE; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS test_started_at TIMESTAMPTZ; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS ready_at TIMESTAMPTZ; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS pre_answers JSONB; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS post_answers JSONB; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS pre_score INT; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS post_score INT; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS assignment_source TEXT NOT NULL DEFAULT 'random'`);err!=nil {log.Fatal(err)}
  a:=&App{db:db,quiz:q,page:template.Must(template.New("page").Funcs(template.FuncMap{"add":func(a,b int)int{return a+b},"seq4":func()[]int{return []int{1,2,3,4}}}).Parse(htmlPage))}
  mux:=http.NewServeMux()
  mux.HandleFunc("GET /",a.home)
@@ -64,6 +64,8 @@ func main() {
  mux.HandleFunc("POST /start",a.start)
  mux.HandleFunc("GET /briefing",a.briefing)
  mux.HandleFunc("POST /begin",a.begin)
+ mux.HandleFunc("GET /name",a.namePage)
+ mux.HandleFunc("POST /name",a.saveName)
  mux.HandleFunc("GET /ready",a.ready)
  mux.HandleFunc("POST /launch",a.launch)
  mux.HandleFunc("GET /test",a.test)
@@ -113,13 +115,13 @@ func token() (string,error) {b:=make([]byte,32);if _,err:=rand.Read(b);err!=nil{
 func (a *App) start(w http.ResponseWriter,r *http.Request) {
  if at,_:=a.current(r);at.ID!=0 {if at.Finished {http.Redirect(w,r,"/result",303)} else if at.TestStarted {http.Redirect(w,r,"/test",303)} else if at.Ready {http.Redirect(w,r,"/ready",303)} else {http.Redirect(w,r,"/briefing",303)};return}
  if err:=r.ParseForm();err!=nil {http.Error(w,"Bad form",400);return}
- name:=strings.TrimSpace(r.FormValue("name"))
+ name:="Участник"
  joinPath:="/start"
  inviteGroup:=r.FormValue("invite_group")
  inviteKey:=r.FormValue("invite_key")
  forced:=validInvitation(inviteGroup,inviteKey) && (inviteGroup=="ranking"||inviteGroup=="control")
  if inviteGroup!=""&&!forced {http.Error(w,"Недействительная ссылка приглашения",403);return}
- if len([]rune(name))<1||len([]rune(name))>40||strings.ContainsAny(name," \t\n")||r.FormValue("consent")!="yes" {a.render(w,PageData{Quiz:a.quiz,JoinPath:joinPath,InviteGroup:inviteGroup,InviteKey:inviteKey,Error:"Введите только имя (без фамилии) и подтвердите согласие."});return}
+ if r.FormValue("consent")!="yes" {a.render(w,PageData{Quiz:a.quiz,JoinPath:joinPath,InviteGroup:inviteGroup,InviteKey:inviteKey,Error:"Введите только имя (без фамилии) и подтвердите согласие."});return}
  t,err:=token();if err!=nil {http.Error(w,"Server error",500);return}
  ctx:=r.Context()
  tx,err:=a.db.Begin(ctx);if err!=nil {http.Error(w,"Database error",500);return}
@@ -138,7 +140,7 @@ func (a *App) start(w http.ResponseWriter,r *http.Request) {
   if nr+nc>=60 {http.Error(w,"Набор по общей ссылке завершён (60 участников). Обратитесь к организаторам исследования.",409);return}
   if nr>nc {group="control"} else if nr==nc {var b [1]byte;if _,err=rand.Read(b[:]);err!=nil {http.Error(w,"Server error",500);return};if b[0]%2==0 {group="control"}}
  }
- _,err=tx.Exec(ctx,"INSERT INTO attempts(token,name,grp,assignment_source) VALUES($1,$2,$3,$4)",t,name,group,source)
+ _,err=tx.Exec(ctx,"INSERT INTO attempts(token,name,grp,assignment_source,name_set) VALUES($1,$2,$3,$4,FALSE)",t,name,group,source)
  if err!=nil {http.Error(w,"Database error",500);return}
  if err=tx.Commit(ctx);err!=nil {http.Error(w,"Database error",500);return}
  http.SetCookie(w,&http.Cookie{Name:"experiment_session",Value:t,Path:"/",HttpOnly:true,SameSite:http.SameSiteLaxMode,Secure:r.TLS!=nil,MaxAge:86400})
@@ -147,27 +149,40 @@ func (a *App) start(w http.ResponseWriter,r *http.Request) {
 func (a *App) current(r *http.Request) (Attempt,error) {
  c,err:=r.Cookie("experiment_session");if err!=nil {return Attempt{},err}
  var at Attempt
- err=a.db.QueryRow(r.Context(),"SELECT id,name,grp,finished_at IS NOT NULL,COALESCE(score,0),test_started_at IS NOT NULL,ready_at IS NOT NULL FROM attempts WHERE token=$1",c.Value).Scan(&at.ID,&at.Name,&at.Group,&at.Finished,&at.Score,&at.TestStarted,&at.Ready)
+ err=a.db.QueryRow(r.Context(),"SELECT id,name,grp,finished_at IS NOT NULL,COALESCE(score,0),test_started_at IS NOT NULL,ready_at IS NOT NULL,name_set FROM attempts WHERE token=$1",c.Value).Scan(&at.ID,&at.Name,&at.Group,&at.Finished,&at.Score,&at.TestStarted,&at.Ready,&at.Named)
  return at,err
 }
 func (a *App) briefing(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil {http.Redirect(w,r,"/",303);return}
  if at.Finished {http.Redirect(w,r,"/result",303);return}
  if at.TestStarted {http.Redirect(w,r,"/test",303);return}
- a.render(w,PageData{Quiz:a.quiz,Attempt:at,Total:-1,SurveyItems:surveyItems})
+ if at.Named {http.Redirect(w,r,"/ready",303);return}
+ a.render(w,PageData{Quiz:a.quiz,Attempt:at,Total:-1})
 }
 func (a *App) begin(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil {http.Error(w,"Unauthorized",401);return}
  if at.Finished {http.Redirect(w,r,"/result",303);return}
- answers,score,err:=parseSurvey(r,"pre_");if err!=nil {http.Error(w,err.Error(),400);return}
- if _,err=a.db.Exec(r.Context(),"UPDATE attempts SET pre_answers=COALESCE(pre_answers,$2::jsonb),pre_score=COALESCE(pre_score,$3),ready_at=COALESCE(ready_at,now()) WHERE id=$1 AND finished_at IS NULL",at.ID,string(answers),score);err!=nil {http.Error(w,"Database error",500);return}
+ http.Redirect(w,r,"/name",303)
+}
+func (a *App) saveName(w http.ResponseWriter,r *http.Request) {
+ at,err:=a.current(r);if err!=nil {http.Error(w,"Unauthorized",401);return}
+ if at.Finished {http.Redirect(w,r,"/result",303);return}
+ name:=strings.TrimSpace(r.FormValue("name"))
+ if len([]rune(name))<1||len([]rune(name))>40||strings.ContainsAny(name," \t\n") {http.Error(w,"Введите только имя без пробелов и фамилии",400);return}
+ if _,err=a.db.Exec(r.Context(),"UPDATE attempts SET name=$2,name_set=TRUE,ready_at=COALESCE(ready_at,clock_timestamp()) WHERE id=$1 AND name_set=FALSE AND finished_at IS NULL",at.ID,name);err!=nil {http.Error(w,"Database error",500);return}
  http.Redirect(w,r,"/ready",303)
+}
+func (a *App) namePage(w http.ResponseWriter,r *http.Request) {
+ at,err:=a.current(r);if err!=nil {http.Redirect(w,r,"/",303);return}
+ if at.Finished {http.Redirect(w,r,"/result",303);return}
+ if at.Named {http.Redirect(w,r,"/ready",303);return}
+ a.render(w,PageData{Quiz:a.quiz,Attempt:at,Total:-5})
 }
 func (a *App) ready(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil {http.Redirect(w,r,"/",303);return}
  if at.Finished {http.Redirect(w,r,"/result",303);return}
  if at.TestStarted {http.Redirect(w,r,"/test",303);return}
- if !at.Ready {http.Redirect(w,r,"/briefing",303);return}
+ if !at.Named {http.Redirect(w,r,"/briefing",303);return}
  a.render(w,PageData{Quiz:a.quiz,Attempt:at,Total:-4})
 }
 func (a *App) launch(w http.ResponseWriter,r *http.Request) {
