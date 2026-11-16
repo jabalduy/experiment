@@ -3,6 +3,8 @@ package main
 import (
  "context"
  "crypto/rand"
+ "crypto/hmac"
+ "crypto/sha256"
  "encoding/csv"
  "encoding/hex"
  "encoding/json"
@@ -23,7 +25,7 @@ type Quiz struct { ID string `json:"id"`; Title string `json:"title"`; Descripti
 type App struct { db *pgxpool.Pool; quiz Quiz; page *template.Template }
 type Attempt struct { ID int64; Name, Group string; Finished bool; Score int; TestStarted bool; DeadlineUnix int64 }
 type Row struct { Name string `json:"name"`; Score int `json:"score"`; Total int `json:"total"` }
-type PageData struct { Quiz Quiz; Attempt Attempt; Ranking []Row; Error string; Total int; JoinPath string; SurveyItems []string; SurveyMode string; SurveyError string; SurveyDone bool }
+type PageData struct { Quiz Quiz; Attempt Attempt; Ranking []Row; Error string; Total int; JoinPath string; InviteGroup string; InviteKey string; SurveyItems []string; SurveyMode string; SurveyError string; SurveyDone bool }
 
 func main() {
  b,err:=os.ReadFile("quizzes/experiment.json"); if err!=nil {log.Fatal(err)}
@@ -44,7 +46,8 @@ func main() {
  baseline_stress INT CHECK(baseline_stress BETWEEN 1 AND 7),
  ranking_seen BOOLEAN NOT NULL DEFAULT FALSE,
  test_started_at TIMESTAMPTZ,
- pre_answers JSONB,post_answers JSONB,pre_score INT,post_score INT
+ pre_answers JSONB,post_answers JSONB,pre_score INT,post_score INT,
+ assignment_source TEXT NOT NULL DEFAULT 'random'
  );
  CREATE TABLE IF NOT EXISTS answers (
  attempt_id BIGINT NOT NULL REFERENCES attempts(id),
@@ -52,7 +55,7 @@ func main() {
  elapsed_ms INT NOT NULL DEFAULT 0, PRIMARY KEY(attempt_id,question_id)
  );`
  if _,err=db.Exec(ctx,schema);err!=nil {log.Fatal(err)}
- if _,err=db.Exec(ctx,`ALTER TABLE attempts ADD COLUMN IF NOT EXISTS baseline_stress INT CHECK(baseline_stress BETWEEN 1 AND 7); ALTER TABLE attempts ADD COLUMN IF NOT EXISTS ranking_seen BOOLEAN NOT NULL DEFAULT FALSE; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS test_started_at TIMESTAMPTZ; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS pre_answers JSONB; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS post_answers JSONB; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS pre_score INT; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS post_score INT`);err!=nil {log.Fatal(err)}
+ if _,err=db.Exec(ctx,`ALTER TABLE attempts ADD COLUMN IF NOT EXISTS baseline_stress INT CHECK(baseline_stress BETWEEN 1 AND 7); ALTER TABLE attempts ADD COLUMN IF NOT EXISTS ranking_seen BOOLEAN NOT NULL DEFAULT FALSE; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS test_started_at TIMESTAMPTZ; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS pre_answers JSONB; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS post_answers JSONB; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS pre_score INT; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS post_score INT; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS assignment_source TEXT NOT NULL DEFAULT 'random'`);err!=nil {log.Fatal(err)}
  a:=&App{db:db,quiz:q,page:template.Must(template.New("page").Funcs(template.FuncMap{"add":func(a,b int)int{return a+b},"seq4":func()[]int{return []int{1,2,3,4}}}).Parse(htmlPage))}
  mux:=http.NewServeMux()
  mux.HandleFunc("GET /",a.home)
@@ -83,11 +86,25 @@ func (a *App) home(w http.ResponseWriter,r *http.Request) {
  if at.ID!=0 {if at.Finished {http.Redirect(w,r,"/result",http.StatusSeeOther)} else if at.TestStarted {http.Redirect(w,r,"/test",http.StatusSeeOther)} else {http.Redirect(w,r,"/briefing",http.StatusSeeOther)};return}
  a.render(w,PageData{Quiz:a.quiz,JoinPath:"/start"})
 }
+func invitationKey(group string) string {
+ secret:=os.Getenv("ADMIN_KEY")
+ if secret=="" {return ""}
+ mac:=hmac.New(sha256.New,[]byte(secret))
+ mac.Write([]byte("experiment-invite-v1:"+group))
+ return hex.EncodeToString(mac.Sum(nil))
+}
+func validInvitation(group,key string) bool {
+ expected:=invitationKey(group)
+ return expected!="" && hmac.Equal([]byte(expected),[]byte(key))
+}
 func (a *App) join(w http.ResponseWriter,r *http.Request) {
- // Legacy invitation URLs must never bypass randomized assignment.
  group:=r.PathValue("group")
- if group!="ranking" && group!="control" {http.NotFound(w,r);return}
- http.Redirect(w,r,"/",http.StatusSeeOther)
+ if group!="ranking"&&group!="control" {http.NotFound(w,r);return}
+ key:=r.URL.Query().Get("key")
+ if !validInvitation(group,key) {http.NotFound(w,r);return}
+ if at,_:=a.current(r);at.ID!=0 {http.Redirect(w,r,"/",303);return}
+ w.Header().Set("Cache-Control","no-store")
+ a.render(w,PageData{Quiz:a.quiz,JoinPath:"/start",InviteGroup:group,InviteKey:key})
 }
 func token() (string,error) {b:=make([]byte,32);if _,err:=rand.Read(b);err!=nil{return "",err};return hex.EncodeToString(b),nil}
 func (a *App) start(w http.ResponseWriter,r *http.Request) {
@@ -95,7 +112,11 @@ func (a *App) start(w http.ResponseWriter,r *http.Request) {
  if err:=r.ParseForm();err!=nil {http.Error(w,"Bad form",400);return}
  name:=strings.TrimSpace(r.FormValue("name"))
  joinPath:="/start"
- if len([]rune(name))<1||len([]rune(name))>40||strings.ContainsAny(name," \t\n")||r.FormValue("consent")!="yes" {a.render(w,PageData{Quiz:a.quiz,JoinPath:joinPath,Error:"Введите только имя (без фамилии) и подтвердите согласие."});return}
+ inviteGroup:=r.FormValue("invite_group")
+ inviteKey:=r.FormValue("invite_key")
+ forced:=validInvitation(inviteGroup,inviteKey) && (inviteGroup=="ranking"||inviteGroup=="control")
+ if inviteGroup!=""&&!forced {http.Error(w,"Недействительная ссылка приглашения",403);return}
+ if len([]rune(name))<1||len([]rune(name))>40||strings.ContainsAny(name," \t\n")||r.FormValue("consent")!="yes" {a.render(w,PageData{Quiz:a.quiz,JoinPath:joinPath,InviteGroup:inviteGroup,InviteKey:inviteKey,Error:"Введите только имя (без фамилии) и подтвердите согласие."});return}
  t,err:=token();if err!=nil {http.Error(w,"Server error",500);return}
  ctx:=r.Context()
  tx,err:=a.db.Begin(ctx);if err!=nil {http.Error(w,"Database error",500);return}
@@ -103,11 +124,18 @@ func (a *App) start(w http.ResponseWriter,r *http.Request) {
  // Serialize assignment to keep the two conditions balanced.
  if _,err=tx.Exec(ctx,"SELECT pg_advisory_xact_lock(894211)");err!=nil {http.Error(w,"Database error",500);return}
  var nr,nc int
- err=tx.QueryRow(ctx,"SELECT count(*) FILTER (WHERE grp='ranking'), count(*) FILTER (WHERE grp='control') FROM attempts").Scan(&nr,&nc)
+ err=tx.QueryRow(ctx,"SELECT count(*) FILTER (WHERE grp='ranking'), count(*) FILTER (WHERE grp='control') FROM attempts WHERE assignment_source='random'").Scan(&nr,&nc)
  if err!=nil {http.Error(w,"Database error",500);return}
  group:="ranking"
- if nr>nc {group="control"} else if nr==nc {var b [1]byte;if _,err=rand.Read(b[:]);err!=nil {http.Error(w,"Server error",500);return};if b[0]%2==0 {group="control"}}
- _,err=tx.Exec(ctx,"INSERT INTO attempts(token,name,grp) VALUES($1,$2,$3)",t,name,group)
+ source:="random"
+ if forced {
+  group=inviteGroup
+  source="manual"
+ } else {
+  if nr+nc>=60 {http.Error(w,"Набор по общей ссылке завершён (60 участников). Обратитесь к организаторам исследования.",409);return}
+  if nr>nc {group="control"} else if nr==nc {var b [1]byte;if _,err=rand.Read(b[:]);err!=nil {http.Error(w,"Server error",500);return};if b[0]%2==0 {group="control"}}
+ }
+ _,err=tx.Exec(ctx,"INSERT INTO attempts(token,name,grp,assignment_source) VALUES($1,$2,$3,$4)",t,name,group,source)
  if err!=nil {http.Error(w,"Database error",500);return}
  if err=tx.Commit(ctx);err!=nil {http.Error(w,"Database error",500);return}
  http.SetCookie(w,&http.Cookie{Name:"experiment_session",Value:t,Path:"/",HttpOnly:true,SameSite:http.SameSiteLaxMode,Secure:r.TLS!=nil,MaxAge:86400})
@@ -191,19 +219,19 @@ func (a *App) admin(w http.ResponseWriter,r *http.Request) { a.adminDashboard(w,
 
 func (a *App) export(w http.ResponseWriter,r *http.Request) {
  if !adminRequire(w,r) {return}
- rows,err:=a.db.Query(r.Context(),`SELECT a.id,a.name,a.grp,a.started_at,a.finished_at,a.test_started_at,a.score,a.post_score,a.pre_score,a.ranking_seen,a.pre_answers::text,a.post_answers::text,
+ rows,err:=a.db.Query(r.Context(),`SELECT a.id,a.name,a.grp,a.started_at,a.finished_at,a.test_started_at,a.score,a.post_score,a.pre_score,a.ranking_seen,a.pre_answers::text,a.post_answers::text,a.assignment_source,
  COALESCE(b.question_id,''),b.choice,b.correct,b.elapsed_ms
  FROM attempts a LEFT JOIN answers b ON b.attempt_id=a.id ORDER BY a.id,b.question_id`)
  if err!=nil {http.Error(w,"Database error",500);return};defer rows.Close()
  w.Header().Set("Content-Type","text/csv; charset=utf-8");w.Header().Set("Content-Disposition","attachment; filename=experiment.csv")
  writer:=csv.NewWriter(w);defer writer.Flush()
- writer.Write([]string{"attempt_id","name","group","registered_at","finished_at","test_started_at","score","post_anxiety_20_80","pre_anxiety_20_80","ranking_seen","pre_answers_1_4","post_answers_1_4","question_id","choice_index","correct","elapsed_ms"})
+ writer.Write([]string{"attempt_id","name","group","registered_at","finished_at","test_started_at","score","post_anxiety_20_80","pre_anxiety_20_80","ranking_seen","pre_answers_1_4","post_answers_1_4","assignment_source","question_id","choice_index","correct","elapsed_ms"})
  for rows.Next() {
-  var id int64;var name,group,start,qid string;var end,testStarted *time.Time;var score,stress,baseline,choice,elapsed *int;var correct *bool;var rankingSeen bool;var preAnswers,postAnswers *string
+  var id int64;var name,group,start,qid string;var end,testStarted *time.Time;var score,stress,baseline,choice,elapsed *int;var correct *bool;var rankingSeen bool;var preAnswers,postAnswers *string;var assignmentSource string
   var started time.Time
-  if err=rows.Scan(&id,&name,&group,&started,&end,&testStarted,&score,&stress,&baseline,&rankingSeen,&preAnswers,&postAnswers,&qid,&choice,&correct,&elapsed);err!=nil {log.Println(err);return}
+  if err=rows.Scan(&id,&name,&group,&started,&end,&testStarted,&score,&stress,&baseline,&rankingSeen,&preAnswers,&postAnswers,&assignmentSource,&qid,&choice,&correct,&elapsed);err!=nil {log.Println(err);return}
   start=started.Format(time.RFC3339)
-  writer.Write([]string{fmt.Sprint(id),name,group,start,fmtTime(end),fmtTime(testStarted),fmtPtr(score),fmtPtr(stress),fmtPtr(baseline),strconv.FormatBool(rankingSeen),fmtStr(preAnswers),fmtStr(postAnswers),qid,fmtPtr(choice),fmtBool(correct),fmtPtr(elapsed)})
+  writer.Write([]string{fmt.Sprint(id),name,group,start,fmtTime(end),fmtTime(testStarted),fmtPtr(score),fmtPtr(stress),fmtPtr(baseline),strconv.FormatBool(rankingSeen),fmtStr(preAnswers),fmtStr(postAnswers),assignmentSource,qid,fmtPtr(choice),fmtBool(correct),fmtPtr(elapsed)})
  }
  if err=rows.Err();err!=nil {log.Println(err)}
 }
@@ -217,7 +245,7 @@ const htmlPage = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><me
 <section class="panel"><span class="eyebrow">Шаг 01 · Информированное согласие</span><h1>Участие в исследовании</h1><p class="lead">Перед началом участия просим ознакомиться со следующей информацией:</p>
 <ol class="consent-info"><li>Участие в исследовании является полностью добровольным. Вы можете отказаться от участия или прекратить его в любой момент без объяснения причин и каких-либо негативных последствий.</li><li>Собранные данные будут использоваться исключительно в учебных и научно-исследовательских целях.</li><li>После завершения исследования вы можете получить информацию о его целях и проверяемой гипотезе, обратившись к организаторам исследования. Контакты для связи: Евгения — lasevgenia@yandex.ru (почта), Таисия — @taissiyasn (тг).</li></ol>
 {{if .Error}}<p role="alert" class="error">{{.Error}}</p>{{end}}
-<form method="post" action="/start"><hr class="divider"><label class="field-title" for="name">Введите, пожалуйста, своё имя</label><input class="text-input" id="name" name="name" maxlength="40" required autocomplete="given-name" placeholder="Ваше имя"><p class="muted">Только имя, без фамилии. В соревновательной группе оно будет видно в рейтинге после теста.</p>
+<form method="post" action="/start">{{if .InviteGroup}}<input type="hidden" name="invite_group" value="{{.InviteGroup}}"><input type="hidden" name="invite_key" value="{{.InviteKey}}">{{end}}<hr class="divider"><label class="field-title" for="name">Введите, пожалуйста, своё имя</label><input class="text-input" id="name" name="name" maxlength="40" required autocomplete="given-name" placeholder="Ваше имя"><p class="muted">Только имя, без фамилии. В соревновательной группе оно будет видно в рейтинге после теста.</p>
 <label class="consent"><input type="checkbox" name="consent" value="yes" required><span><strong>Подтверждение согласия.</strong> Нажимая «Согласен(на) участвовать», я подтверждаю, что ознакомился(-ась) с представленной информацией, понимаю характер и условия исследования и добровольно соглашаюсь принять в нём участие.</span></label><div class="actions"><button class="btn" type="submit">Согласен(на) участвовать →</button></div></form></section>
 {{else if eq .Total -3}}
 <section class="panel thanks"><span class="eyebrow">Исследование завершено</span><h1>Благодарим за участие в нашем исследовании!</h1><p>Спасибо, {{.Attempt.Name}}! Ваши ответы сохранены.</p><div class="cat-card"><span class="cat-heart">♥</span><img src="/static/thank-you-cat.svg" alt="Милая кошка благодарит вас за участие" onerror="this.style.display='none';this.nextElementSibling.style.display='block'"><div style="display:none;font-size:90px">🐱</div><p>Спасибо, что помогаете науке! ♡</p></div></section>
