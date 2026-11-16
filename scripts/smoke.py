@@ -56,13 +56,13 @@ def run():
     for number in (1, 2):
         person = client()
         status, _, landing = request(person, "/")
-        assert status == 200 and "name=\"name\"" in landing and "baseline_stress" not in landing
+        assert status == 200 and "name=\"name\"" in landing and "pre_1" not in landing
         status, url, briefing = request(person, "/start", {
             "name": "Pilot " + str(number),
             "consent": "yes",
         })
         assert status == 200 and "/briefing" in url, url
-        assert "Начать отвечать" in briefing and "baseline_stress" in briefing
+        assert "Начать задания" in briefing and "pre_1" in briefing
         is_ranking = "Соревновательный режим" in briefing
         assigned_groups.append(is_ranking)
         if number == 2:
@@ -71,7 +71,7 @@ def run():
         status, url, blocked = request(person, "/test")
         assert "/briefing" in url and "answer_q" not in blocked
 
-        status, url, page = request(person, "/begin", {"baseline_stress": "3"})
+        status, url, page = request(person, "/begin", {"pre_" + str(i): "2" for i in range(1, 21)})
         assert "/test" in url and "quizForm" in page
         assert "Таблица лидеров" not in page
         assert "Соревновательный режим" not in page
@@ -81,10 +81,9 @@ def run():
         assert names, "No quiz questions"
         answers = {"answer_" + name: "0" for name in names}
         answers.update({"time_" + name: "250" for name in names})
-        answers["stress"] = "4"
         status, url, result = request(person, "/finish", answers)
         assert status == 200 and "/result" in url
-        assert "Тест завершён" in result
+        assert "Ваш результат" in result
         assert ("Таблица лидеров" in result) == is_ranking
 
         status, url, _ = request(person, "/finish", answers)
@@ -94,6 +93,11 @@ def run():
             assert "Pilot " + str(number) in ranking
         else:
             expect_forbidden(person, "/api/leaderboard")
+
+        status, url, survey = request(person, "/survey")
+        assert "/survey" in url and "post_20" in survey
+        status, url, thanks = request(person, "/survey", {"post_" + str(i): "3" for i in range(1, 21)})
+        assert "/thanks" in url and "Благодарим за участие" in thanks
 
     # Legacy forced-group links must redirect to the single randomized entry.
     for group in ("ranking", "control"):
@@ -119,7 +123,7 @@ def run():
     assert status == 200 and "Pilot 1" in dashboard and "Pilot 2" in dashboard
     assert "Сравнение групп" in dashboard
     status, _, csv = request(admin, "/admin/export", headers=headers)
-    assert status == 200 and "test_started_at" in csv and "Pilot 1" in csv
+    assert status == 200 and "pre_answers_1_4" in csv and "Pilot 1" in csv
     print("PASS: 60 balanced random assignments, briefing, test, result, ranking, admin and CSV")
 
 
