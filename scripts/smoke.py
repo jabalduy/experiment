@@ -99,11 +99,28 @@ def run():
         status, url, thanks = request(person, "/survey", {"post_" + str(i): "3" for i in range(1, 21)})
         assert "/thanks" in url and "Благодарим за участие" in thanks
 
-    # Legacy forced-group links must redirect to the single randomized entry.
+    # Signed manual links must be visible only in admin and bypass random quota.
+    headers = {"X-Admin-Key": ADMIN}
+    status, _, dashboard = request(admin, "/admin", headers=headers)
+    assert status == 200 and "Ссылки для приглашения" in dashboard
+    import html
     for group in ("ranking", "control"):
-        status, url, landing = request(client(), "/join/" + group)
-        assert status == 200 and url.rstrip("/") == BASE
-        assert 'action="/start"' in landing
+        match = re.search(r'value="([^"]*/join/' + group + r'\?key=[a-f0-9]+)"', dashboard)
+        assert match, "Missing signed manual link: " + group
+        link = html.unescape(match.group(1))
+        if group == "control": control_link = link
+        path = urllib.parse.urlsplit(link).path + "?" + urllib.parse.urlsplit(link).query
+        visitor = client()
+        status, _, landing = request(visitor, path)
+        assert status == 200 and 'name="invite_group"' in landing
+        key = urllib.parse.parse_qs(urllib.parse.urlsplit(link).query)["key"][0]
+        status, url, briefing = request(visitor, "/start", {
+            "name": "Manual" + group, "consent": "yes",
+            "invite_group": group, "invite_key": key,
+        })
+        assert "/briefing" in url
+        assert ("Соревновательный режим" in briefing) == (group == "ranking")
+    expect_forbidden(admin, "/join/ranking")
 
     # 60 registrations must produce exactly 30 assignments per condition.
     # The first two users above already occupy one place in each group.
@@ -117,6 +134,11 @@ def run():
         assert "/briefing" in url
         totals["Соревновательный режим" in briefing] += 1
     assert totals == {True: 30, False: 30}, totals
+
+    # Additional registrations remain possible after the random cohort is full.
+    visitor = client()
+    status, url, briefing = request(visitor, "/start", {"name": "ExtraControl", "consent": "yes", "invite_group": "control", "invite_key": urllib.parse.parse_qs(urllib.parse.urlsplit(control_link).query)["key"][0]})
+    assert "/briefing" in url and "Соревновательный режим" not in briefing
 
     headers = {"X-Admin-Key": ADMIN}
     status, _, dashboard = request(admin, "/admin", headers=headers)
