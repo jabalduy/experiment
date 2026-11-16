@@ -95,30 +95,24 @@ def run():
         else:
             expect_forbidden(person, "/api/leaderboard")
 
-    # Explicit invitation links must override automatic group balancing.
+    # Legacy forced-group links must redirect to the single randomized entry.
     for group in ("ranking", "control"):
+        status, url, landing = request(client(), "/join/" + group)
+        assert status == 200 and url.rstrip("/") == BASE
+        assert 'action="/start"' in landing
+
+    # 60 registrations must produce exactly 30 assignments per condition.
+    # The first two users above already occupy one place in each group.
+    totals = {True: 1, False: 1}
+    for number in range(3, 61):
         person = client()
-        status, _, invitation = request(person, "/join/" + group)
-        assert status == 200 and 'action="/join/' + group + '/start"' in invitation
-        assert "baseline_stress" not in invitation
-        status, url, briefing = request(person, "/join/" + group + "/start", {
-            "name": "Invite " + group,
+        status, url, briefing = request(person, "/start", {
+            "name": "Pilot " + str(number),
             "consent": "yes",
         })
         assert "/briefing" in url
-        assert ("Соревновательный режим" in briefing) == (group == "ranking")
-        assert "baseline_stress" in briefing
-        status, url, page = request(person, "/begin", {"baseline_stress": "5"})
-        assert "/test" in url
-        assert "baseline_stress" not in page
-        names = re.findall(r'name="answer_([^"]+)" value="0"', page)
-        assert names
-        answers = {"answer_" + name: "0" for name in names}
-        answers.update({"time_" + name: "200" for name in names})
-        answers["stress"] = "6"
-        status, url, result = request(person, "/finish", answers)
-        assert "/result" in url
-        assert ("Таблица лидеров" in result) == (group == "ranking")
+        totals["Соревновательный режим" in briefing] += 1
+    assert totals == {True: 30, False: 30}, totals
 
     headers = {"X-Admin-Key": ADMIN}
     status, _, dashboard = request(admin, "/admin", headers=headers)
@@ -126,7 +120,7 @@ def run():
     assert "Сравнение групп" in dashboard
     status, _, csv = request(admin, "/admin/export", headers=headers)
     assert status == 200 and "test_started_at" in csv and "Pilot 1" in csv
-    print("PASS: registration, balanced assignment, briefing, test, result, ranking, admin and CSV")
+    print("PASS: 60 balanced random assignments, briefing, test, result, ranking, admin and CSV")
 
 
 if __name__ == "__main__":
