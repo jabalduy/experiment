@@ -20,10 +20,10 @@ import (
  "github.com/jackc/pgx/v5/pgxpool"
 )
 
-type Question struct { ID string `json:"id"`; Text string `json:"text"`; Options []string `json:"options"`; Correct int `json:"correct"` }
+type Question struct { ID string `json:"id"`; Text string `json:"text"`; Options []string `json:"options"`; Input string `json:"input,omitempty"`; Answer string `json:"answer,omitempty"`; Correct int `json:"correct"` }
 type Quiz struct { ID string `json:"id"`; Title string `json:"title"`; Description string `json:"description"`; Questions []Question `json:"questions"` }
 type App struct { db *pgxpool.Pool; quiz Quiz; page *template.Template }
-type Attempt struct { ID int64; Name, Group string; Finished bool; Score int; TestStarted bool; DeadlineUnix int64 }
+type Attempt struct { ID int64; Name, Group string; Finished bool; Score int; TestStarted bool; Ready bool; DeadlineUnix int64 }
 type Row struct { Name string `json:"name"`; Score int `json:"score"`; Total int `json:"total"` }
 type PageData struct { Quiz Quiz; Attempt Attempt; Ranking []Row; Error string; Total int; JoinPath string; InviteGroup string; InviteKey string; SurveyItems []string; SurveyMode string; SurveyError string; SurveyDone bool }
 
@@ -32,7 +32,7 @@ func main() {
  var q Quiz; if err=json.Unmarshal(b,&q);err!=nil {log.Fatal(err)}
  if len(q.Questions)==0 {log.Fatal("quiz must have questions")}
  seen:=map[string]bool{}
- for _,v:=range q.Questions {if v.ID==""||seen[v.ID]||len(v.Options)<2||v.Correct<0||v.Correct>=len(v.Options) {log.Fatal("invalid quiz question: ",v.ID)};seen[v.ID]=true}
+ for _,v:=range q.Questions {if v.ID==""||seen[v.ID]||(v.Input==""&&(len(v.Options)<2||v.Correct<0||v.Correct>=len(v.Options)))||(v.Input!=""&&(v.Answer==""||(v.Input!="number"&&v.Input!="letter"))) {log.Fatal("invalid quiz question: ",v.ID)};seen[v.ID]=true}
  url:=os.Getenv("DATABASE_URL");if url=="" {log.Fatal("DATABASE_URL is required")}
  db,err:=pgxpool.New(context.Background(),url);if err!=nil {log.Fatal(err)}
  defer db.Close()
@@ -46,6 +46,7 @@ func main() {
  baseline_stress INT CHECK(baseline_stress BETWEEN 1 AND 7),
  ranking_seen BOOLEAN NOT NULL DEFAULT FALSE,
  test_started_at TIMESTAMPTZ,
+ ready_at TIMESTAMPTZ,
  pre_answers JSONB,post_answers JSONB,pre_score INT,post_score INT,
  assignment_source TEXT NOT NULL DEFAULT 'random'
  );
@@ -55,7 +56,7 @@ func main() {
  elapsed_ms INT NOT NULL DEFAULT 0, PRIMARY KEY(attempt_id,question_id)
  );`
  if _,err=db.Exec(ctx,schema);err!=nil {log.Fatal(err)}
- if _,err=db.Exec(ctx,`ALTER TABLE attempts ADD COLUMN IF NOT EXISTS baseline_stress INT CHECK(baseline_stress BETWEEN 1 AND 7); ALTER TABLE attempts ADD COLUMN IF NOT EXISTS ranking_seen BOOLEAN NOT NULL DEFAULT FALSE; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS test_started_at TIMESTAMPTZ; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS pre_answers JSONB; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS post_answers JSONB; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS pre_score INT; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS post_score INT; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS assignment_source TEXT NOT NULL DEFAULT 'random'`);err!=nil {log.Fatal(err)}
+ if _,err=db.Exec(ctx,`ALTER TABLE attempts ADD COLUMN IF NOT EXISTS baseline_stress INT CHECK(baseline_stress BETWEEN 1 AND 7); ALTER TABLE attempts ADD COLUMN IF NOT EXISTS ranking_seen BOOLEAN NOT NULL DEFAULT FALSE; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS test_started_at TIMESTAMPTZ; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS ready_at TIMESTAMPTZ; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS pre_answers JSONB; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS post_answers JSONB; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS pre_score INT; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS post_score INT; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS assignment_source TEXT NOT NULL DEFAULT 'random'`);err!=nil {log.Fatal(err)}
  a:=&App{db:db,quiz:q,page:template.Must(template.New("page").Funcs(template.FuncMap{"add":func(a,b int)int{return a+b},"seq4":func()[]int{return []int{1,2,3,4}}}).Parse(htmlPage))}
  mux:=http.NewServeMux()
  mux.HandleFunc("GET /",a.home)
@@ -63,6 +64,8 @@ func main() {
  mux.HandleFunc("POST /start",a.start)
  mux.HandleFunc("GET /briefing",a.briefing)
  mux.HandleFunc("POST /begin",a.begin)
+ mux.HandleFunc("GET /ready",a.ready)
+ mux.HandleFunc("POST /launch",a.launch)
  mux.HandleFunc("GET /test",a.test)
  mux.HandleFunc("POST /finish",a.finish)
  mux.HandleFunc("GET /result",a.result)
@@ -83,7 +86,7 @@ func (a *App) render(w http.ResponseWriter,data PageData) {
 }
 func (a *App) home(w http.ResponseWriter,r *http.Request) {
  at,_:=a.current(r)
- if at.ID!=0 {if at.Finished {http.Redirect(w,r,"/result",http.StatusSeeOther)} else if at.TestStarted {http.Redirect(w,r,"/test",http.StatusSeeOther)} else {http.Redirect(w,r,"/briefing",http.StatusSeeOther)};return}
+ if at.ID!=0 {if at.Finished {http.Redirect(w,r,"/result",http.StatusSeeOther)} else if at.TestStarted {http.Redirect(w,r,"/test",http.StatusSeeOther)} else if at.Ready {http.Redirect(w,r,"/ready",http.StatusSeeOther)} else {http.Redirect(w,r,"/briefing",http.StatusSeeOther)};return}
  a.render(w,PageData{Quiz:a.quiz,JoinPath:"/start"})
 }
 func invitationKey(group string) string {
@@ -108,7 +111,7 @@ func (a *App) join(w http.ResponseWriter,r *http.Request) {
 }
 func token() (string,error) {b:=make([]byte,32);if _,err:=rand.Read(b);err!=nil{return "",err};return hex.EncodeToString(b),nil}
 func (a *App) start(w http.ResponseWriter,r *http.Request) {
- if at,_:=a.current(r);at.ID!=0 {if at.Finished {http.Redirect(w,r,"/result",303)} else if at.TestStarted {http.Redirect(w,r,"/test",303)} else {http.Redirect(w,r,"/briefing",303)};return}
+ if at,_:=a.current(r);at.ID!=0 {if at.Finished {http.Redirect(w,r,"/result",303)} else if at.TestStarted {http.Redirect(w,r,"/test",303)} else if at.Ready {http.Redirect(w,r,"/ready",303)} else {http.Redirect(w,r,"/briefing",303)};return}
  if err:=r.ParseForm();err!=nil {http.Error(w,"Bad form",400);return}
  name:=strings.TrimSpace(r.FormValue("name"))
  joinPath:="/start"
@@ -144,7 +147,7 @@ func (a *App) start(w http.ResponseWriter,r *http.Request) {
 func (a *App) current(r *http.Request) (Attempt,error) {
  c,err:=r.Cookie("experiment_session");if err!=nil {return Attempt{},err}
  var at Attempt
- err=a.db.QueryRow(r.Context(),"SELECT id,name,grp,finished_at IS NOT NULL,COALESCE(score,0),test_started_at IS NOT NULL FROM attempts WHERE token=$1",c.Value).Scan(&at.ID,&at.Name,&at.Group,&at.Finished,&at.Score,&at.TestStarted)
+ err=a.db.QueryRow(r.Context(),"SELECT id,name,grp,finished_at IS NOT NULL,COALESCE(score,0),test_started_at IS NOT NULL,ready_at IS NOT NULL FROM attempts WHERE token=$1",c.Value).Scan(&at.ID,&at.Name,&at.Group,&at.Finished,&at.Score,&at.TestStarted,&at.Ready)
  return at,err
 }
 func (a *App) briefing(w http.ResponseWriter,r *http.Request) {
@@ -157,17 +160,30 @@ func (a *App) begin(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil {http.Error(w,"Unauthorized",401);return}
  if at.Finished {http.Redirect(w,r,"/result",303);return}
  answers,score,err:=parseSurvey(r,"pre_");if err!=nil {http.Error(w,err.Error(),400);return}
- if _,err=a.db.Exec(r.Context(),"UPDATE attempts SET pre_answers=COALESCE(pre_answers,$2::jsonb),pre_score=COALESCE(pre_score,$3),test_started_at=COALESCE(test_started_at,now()) WHERE id=$1 AND finished_at IS NULL",at.ID,string(answers),score);err!=nil {http.Error(w,"Database error",500);return}
+ if _,err=a.db.Exec(r.Context(),"UPDATE attempts SET pre_answers=COALESCE(pre_answers,$2::jsonb),pre_score=COALESCE(pre_score,$3),ready_at=COALESCE(ready_at,now()) WHERE id=$1 AND finished_at IS NULL",at.ID,string(answers),score);err!=nil {http.Error(w,"Database error",500);return}
+ http.Redirect(w,r,"/ready",303)
+}
+func (a *App) ready(w http.ResponseWriter,r *http.Request) {
+ at,err:=a.current(r);if err!=nil {http.Redirect(w,r,"/",303);return}
+ if at.Finished {http.Redirect(w,r,"/result",303);return}
+ if at.TestStarted {http.Redirect(w,r,"/test",303);return}
+ if !at.Ready {http.Redirect(w,r,"/briefing",303);return}
+ a.render(w,PageData{Quiz:a.quiz,Attempt:at,Total:-4})
+}
+func (a *App) launch(w http.ResponseWriter,r *http.Request) {
+ at,err:=a.current(r);if err!=nil {http.Error(w,"Unauthorized",401);return}
+ if !at.Ready {http.Redirect(w,r,"/briefing",303);return}
+ if !at.Finished {if _,err=a.db.Exec(r.Context(),"UPDATE attempts SET test_started_at=COALESCE(test_started_at,now()) WHERE id=$1 AND ready_at IS NOT NULL AND finished_at IS NULL",at.ID);err!=nil {http.Error(w,"Database error",500);return}}
  http.Redirect(w,r,"/test",303)
 }
 func (a *App) test(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil {http.Redirect(w,r,"/",303);return}
  if at.Finished {http.Redirect(w,r,"/result",303);return}
- if !at.TestStarted {http.Redirect(w,r,"/briefing",303);return}
+ if !at.TestStarted {if at.Ready {http.Redirect(w,r,"/ready",303)} else {http.Redirect(w,r,"/briefing",303)};return}
  // Copy questions without correct answer indices to avoid exposing answer keys.
  q:=a.quiz;q.Questions=append([]Question(nil),q.Questions...)
- for i:=range q.Questions {q.Questions[i].Correct=-1}
- if err=a.db.QueryRow(r.Context(),"SELECT (extract(epoch from test_started_at)::bigint+600) FROM attempts WHERE id=$1",at.ID).Scan(&at.DeadlineUnix);err!=nil {http.Error(w,"Database error",500);return}
+ for i:=range q.Questions {q.Questions[i].Correct=-1;q.Questions[i].Answer=""}
+ if err=a.db.QueryRow(r.Context(),"SELECT (extract(epoch from test_started_at+interval '10 minutes')*1000)::bigint FROM attempts WHERE id=$1",at.ID).Scan(&at.DeadlineUnix);err!=nil {http.Error(w,"Database error",500);return}
  a.render(w,PageData{Quiz:q,Attempt:at,Total:len(q.Questions)})
 }
 func (a *App) finish(w http.ResponseWriter,r *http.Request) {
@@ -178,10 +194,14 @@ func (a *App) finish(w http.ResponseWriter,r *http.Request) {
  type answer struct {id string;choice,elapsed int;correct bool}
  items:=make([]answer,0,len(a.quiz.Questions));score:=0
  for _,q:=range a.quiz.Questions {
-  v:=r.FormValue("answer_"+q.ID);choice,e:=strconv.Atoi(v)
-  if v=="" {choice=-1} else if e!=nil||choice<0||choice>=len(q.Options) {http.Error(w,"Некорректный ответ",400);return}
+  v:=r.FormValue("answer_"+q.ID);choice:=-1;good:=false
+  if q.Input!="" {
+   normalized:=strings.TrimSpace(v)
+   if q.Input=="letter" {normalized=strings.ToUpper(normalized)}
+   if normalized!="" {good=normalized==q.Answer}
+  } else if v!="" {n,e:=strconv.Atoi(v);if e!=nil||n<0||n>=len(q.Options) {http.Error(w,"Некорректный ответ",400);return};choice=n;good=choice==q.Correct}
   ms,_:=strconv.Atoi(r.FormValue("time_"+q.ID));if ms<0||ms>3600000 {ms=0}
-  good:=choice==q.Correct;if good {score++}
+  if good {score++}
   items=append(items,answer{q.ID,choice,ms,good})
  }
  ctx:=r.Context();tx,err:=a.db.Begin(ctx);if err!=nil {http.Error(w,"Database error",500);return};defer tx.Rollback(ctx)
@@ -206,7 +226,7 @@ func (a *App) leaderboard(w http.ResponseWriter,r *http.Request) {
 }
 func (a *App) result(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil {http.Redirect(w,r,"/",303);return}
- if !at.Finished {if at.TestStarted {http.Redirect(w,r,"/test",303)} else {http.Redirect(w,r,"/briefing",303)};return}
+ if !at.Finished {if at.TestStarted {http.Redirect(w,r,"/test",303)} else if at.Ready {http.Redirect(w,r,"/ready",303)} else {http.Redirect(w,r,"/briefing",303)};return}
  data:=PageData{Quiz:a.quiz,Attempt:at,Total:len(a.quiz.Questions)}
  if at.Group=="ranking" {data.Ranking,err=a.getRanking(r.Context());if err!=nil {http.Error(w,"Database error",500);return}}
  var postDone bool
@@ -248,7 +268,7 @@ const htmlPage = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><me
 <form method="post" action="/start">{{if .InviteGroup}}<input type="hidden" name="invite_group" value="{{.InviteGroup}}"><input type="hidden" name="invite_key" value="{{.InviteKey}}">{{end}}<hr class="divider"><label class="field-title" for="name">Введите, пожалуйста, своё имя</label><input class="text-input" id="name" name="name" maxlength="40" required autocomplete="given-name" placeholder="Ваше имя"><p class="muted">Только имя, без фамилии. В соревновательной группе оно будет видно в рейтинге после теста.</p>
 <label class="consent"><input type="checkbox" name="consent" value="yes" required><span><strong>Подтверждение согласия.</strong> Нажимая «Согласен(на) участвовать», я подтверждаю, что ознакомился(-ась) с представленной информацией, понимаю характер и условия исследования и добровольно соглашаюсь принять в нём участие.</span></label><div class="actions"><button class="btn" type="submit">Согласен(на) участвовать →</button></div></form></section>
 {{else if eq .Total -3}}
-<section class="panel thanks"><span class="eyebrow">Исследование завершено</span><h1>Благодарим за участие в нашем исследовании!</h1><p>Спасибо, {{.Attempt.Name}}! Ваши ответы сохранены.</p><div class="cat-card"><span class="cat-heart">♥</span><img src="/static/thank-you-cat.svg" alt="Милая кошка благодарит вас за участие" onerror="this.style.display='none';this.nextElementSibling.style.display='block'"><div style="display:none;font-size:90px">🐱</div><p>Спасибо, что помогаете науке! ♡</p></div></section>
+<section class="panel thanks"><span class="eyebrow">Исследование завершено</span><h1>Благодарим за участие в нашем исследовании!</h1><p>Спасибо, ваши ответы сохранены.</p></section>
 {{else if eq .Total -2}}
 <section class="panel"><span class="eyebrow">Шаг 04 · Оценка состояния</span><h1>Как вы чувствуете себя сейчас?</h1><div class="survey-intro"><p>Теперь, пожалуйста, оцените представленные ниже утверждения, опираясь на то, как вы чувствуете себя в данный момент.</p><p>Для каждого утверждения выберите один из четырёх вариантов ответа:</p><p><strong>1</strong> — Нет, это не так<br><strong>2</strong> — Пожалуй, так<br><strong>3</strong> — Верно<br><strong>4</strong> — Совершенно верно</p><p>Пожалуйста, отвечайте искренне, ориентируясь на своё текущее состояние.</p></div><form action="/survey" method="post"><div class="survey-list">{{range $i,$item:=.SurveyItems}}<fieldset class="survey-item"><legend><strong>{{add $i 1}}.</strong> {{$item}}</legend><div class="scale four">{{range seq4}}<label><input type="radio" name="post_{{add $i 1}}" value="{{.}}" required><span>{{.}}</span></label>{{end}}</div></fieldset>{{end}}</div><div class="actions"><button class="btn" type="submit">Завершить исследование →</button></div></form></section>
 {{else if .Attempt.Finished}}
@@ -258,11 +278,13 @@ const htmlPage = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><me
 {{else if eq .Total -1}}
 <section class="panel"><span class="eyebrow">Шаг 02 · Инструкция</span><h1>Перед началом</h1>
 {{if eq .Attempt.Group "ranking"}}<div class="note"><h2>Соревновательный режим</h2><p>Вам предстоит выполнить 5 заданий за ограниченное время. Ваш результат будет сопоставлен с результатами других участников. После выполнения задания вы сможете ознакомиться с распределением результатов между всеми участниками в рейтинге. Постарайтесь выполнить задания как можно точнее.</p></div>{{else}}<div class="note"><p>Вам предстоит выполнить 5 заданий за ограниченное время. Вы увидите свой результат после выполнения заданий, и он будет использован только в рамках исследования. Постарайтесь выполнить задания как можно точнее.</p></div>{{end}}
-<p>Время на задания — <strong>10 минут</strong>.</p><hr class="divider"><h2>Оценка текущего состояния</h2><div class="survey-intro"><p>Теперь, пожалуйста, оцените представленные ниже утверждения, опираясь на то, как вы чувствуете себя в данный момент.</p><p>Для каждого утверждения выберите один из четырёх вариантов ответа:</p><p><strong>1</strong> — Нет, это не так<br><strong>2</strong> — Пожалуй, так<br><strong>3</strong> — Верно<br><strong>4</strong> — Совершенно верно</p><p>Пожалуйста, отвечайте искренне, ориентируясь на своё текущее состояние.</p></div><form action="/begin" method="post"><div class="survey-list">{{range $i,$item:=.SurveyItems}}<fieldset class="survey-item"><legend><strong>{{add $i 1}}.</strong> {{$item}}</legend><div class="scale four">{{range seq4}}<label><input type="radio" name="pre_{{add $i 1}}" value="{{.}}" required><span>{{.}}</span></label>{{end}}</div></fieldset>{{end}}</div><div class="actions"><button class="btn" type="submit">Начать задания →</button></div></form></section>
+<p>Время на задания — <strong>10 минут</strong>.</p><hr class="divider"><h2>Оценка текущего состояния</h2><div class="survey-intro"><p>Теперь, пожалуйста, оцените представленные ниже утверждения, опираясь на то, как вы чувствуете себя в данный момент.</p><p>Для каждого утверждения выберите один из четырёх вариантов ответа:</p><p><strong>1</strong> — Нет, это не так<br><strong>2</strong> — Пожалуй, так<br><strong>3</strong> — Верно<br><strong>4</strong> — Совершенно верно</p><p>Пожалуйста, отвечайте искренне, ориентируясь на своё текущее состояние.</p></div><form action="/begin" method="post"><div class="survey-list">{{range $i,$item:=.SurveyItems}}<fieldset class="survey-item"><legend><strong>{{add $i 1}}.</strong> {{$item}}</legend><div class="scale four">{{range seq4}}<label><input type="radio" name="pre_{{add $i 1}}" value="{{.}}" required><span>{{.}}</span></label>{{end}}</div></fieldset>{{end}}</div><div class="actions"><button class="btn" type="submit">Продолжить →</button></div></form></section>
+{{else if eq .Total -4}}
+<section class="panel"><span class="eyebrow">Шаг 03 · Перед заданиями</span><h1>Перед началом таймера</h1><p>Вам предстоит выполнить 5 заданий на логическое мышление и поиск закономерностей.</p><p>Пожалуйста, выполняйте задания самостоятельно, без использования искусственного интеллекта, поисковых систем и помощи других людей.</p><p>При необходимости можно пользоваться бумагой и ручкой для записей и вычислений.</p><p>Если задание покажется сложным, постарайтесь найти решение самостоятельно.</p><p><strong>Желаем удачи!</strong></p><p>На выполнение отводится ровно 10 минут. Отсчёт начнётся после нажатия кнопки.</p><form method="post" action="/launch"><div class="actions"><button class="btn" type="submit">Начать задания →</button></div></form></section>
 {{else}}
 <div class="quiz-top"><div><span class="eyebrow">Шаг 03 · Задания</span><h1>Логические задачи</h1></div><span class="tag"><span id="answered">0</span> / {{.Total}} ответов</span></div>
-<section class="panel"><p>Вам предстоит выполнить 5 заданий на логическое мышление и поиск закономерностей.</p><p>Пожалуйста, выполняйте задания самостоятельно, без использования искусственного интеллекта, поисковых систем и помощи других людей.</p><p>При необходимости можно пользоваться бумагой и ручкой для записей и вычислений.</p><p>Если задание покажется сложным, постарайтесь найти решение самостоятельно.</p><p><strong>Желаем удачи!</strong></p><div class="timer" id="timer" role="timer" aria-live="off">10:00</div><p class="muted">Через 10 минут ответы отправятся автоматически. Если не знаете ответ, можно оставить вопрос пустым.</p></section>
+<section class="panel"><div class="timer" id="timer" role="timer" aria-live="off">10:00</div><p class="muted">Через 10 минут ответы отправятся автоматически. Если не знаете ответ, можно оставить вопрос пустым.</p></section>
 <div class="progress" role="progressbar" aria-label="Прогресс теста" aria-valuemin="0" aria-valuemax="{{.Total}}" aria-valuenow="0" id="progress"><div id="progressFill"></div></div>
-<form id="quizForm" method="post" action="/finish">{{range $i,$q:=.Quiz.Questions}}<fieldset class="question" data-q="{{$q.ID}}"><legend class="question-num">Задание {{add $i 1}}</legend><h3>{{$q.Text}}</h3>{{range $j,$option:=$q.Options}}<label class="option"><input type="radio" name="answer_{{$q.ID}}" value="{{$j}}"><span>{{$option}}</span></label>{{end}}<input type="hidden" name="time_{{$q.ID}}" value="0"></fieldset>{{end}}<div class="actions"><button class="btn" id="submitBtn" type="submit">Завершить задания →</button></div></form>
-<script>(function(){const form=document.getElementById('quizForm'),questions=Array.from(form.querySelectorAll('[data-q]')),started=Date.now(),progress=document.getElementById('progress'),fill=document.getElementById('progressFill'),count=document.getElementById('answered'),timer=document.getElementById('timer'),deadline=Number('{{.Attempt.DeadlineUnix}}')*1000;let sent=false;function update(){let done=0;questions.forEach(q=>{if(q.querySelector('input[type=radio]:checked'))done++});count.textContent=done;fill.style.width=(done/questions.length*100)+'%';progress.setAttribute('aria-valuenow',done)}questions.forEach(q=>{const elapsed=q.querySelector('input[type=hidden]');q.querySelectorAll('input[type=radio]').forEach(r=>r.addEventListener('change',()=>{elapsed.value=String(Date.now()-started);update()}))});function tick(){const left=Math.max(0,Math.ceil((deadline-Date.now())/1000));timer.textContent=String(Math.floor(left/60)).padStart(2,'0')+':'+String(left%60).padStart(2,'0');if(left===0&&!sent){sent=true;form.submit()}}form.addEventListener('submit',()=>{sent=true;document.getElementById('submitBtn').disabled=true});update();tick();setInterval(tick,500)})();</script>
+<form id="quizForm" method="post" action="/finish">{{range $i,$q:=.Quiz.Questions}}<fieldset class="question" data-q="{{$q.ID}}"><legend class="question-num">Задание {{add $i 1}}</legend><h3>{{$q.Text}}</h3>{{if $q.Input}}<label class="field-title" for="answer_{{$q.ID}}">Введите только {{if eq $q.Input "number"}}число{{else}}букву{{end}}</label><input class="text-input" type="text" id="answer_{{$q.ID}}" name="answer_{{$q.ID}}" autocomplete="off" inputmode="{{if eq $q.Input "number"}}numeric{{else}}text{{end}}">{{else}}{{range $j,$option:=$q.Options}}<label class="option"><input type="radio" name="answer_{{$q.ID}}" value="{{$j}}"><span>{{$option}}</span></label>{{end}}{{end}}<input type="hidden" name="time_{{$q.ID}}" value="0"></fieldset>{{end}}<div class="actions"><button class="btn" id="submitBtn" type="submit">Завершить задания →</button></div></form>
+<script>(function(){const form=document.getElementById('quizForm'),questions=Array.from(form.querySelectorAll('[data-q]')),started=Date.now(),progress=document.getElementById('progress'),fill=document.getElementById('progressFill'),count=document.getElementById('answered'),timer=document.getElementById('timer'),deadline=Number('{{.Attempt.DeadlineUnix}}');let sent=false;function update(){let done=0;questions.forEach(q=>{if(q.querySelector('input[type=radio]:checked')||(q.querySelector('input[type=text]')&&q.querySelector('input[type=text]').value.trim()))done++});count.textContent=done;fill.style.width=(done/questions.length*100)+'%';progress.setAttribute('aria-valuenow',done)}questions.forEach(q=>{const elapsed=q.querySelector('input[type=hidden]');q.querySelectorAll('input[type=radio],input[type=text]').forEach(r=>r.addEventListener(r.type==='text'?'input':'change',()=>{elapsed.value=String(Date.now()-started);update()}))});function tick(){const left=Math.max(0,Math.ceil((deadline-Date.now())/1000));timer.textContent=String(Math.floor(left/60)).padStart(2,'0')+':'+String(left%60).padStart(2,'0');if(left===0&&!sent){sent=true;form.submit()}}form.addEventListener('submit',()=>{sent=true;document.getElementById('submitBtn').disabled=true});update();tick();setInterval(tick,500)})();</script>
 {{end}}</main><footer class="foot">Учебное исследование · Спасибо за участие</footer></div></body></html>`
