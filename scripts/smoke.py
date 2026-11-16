@@ -62,7 +62,7 @@ def run():
             "consent": "yes",
         })
         assert status == 200 and "/briefing" in url, url
-        assert "Начать задания" in briefing and "pre_1" in briefing
+        assert "Продолжить" in briefing and "pre_1" in briefing
         is_ranking = "Соревновательный режим" in briefing
         assigned_groups.append(is_ranking)
         if number == 2:
@@ -72,18 +72,21 @@ def run():
         assert "/briefing" in url and "answer_q" not in blocked
 
         status, url, page = request(person, "/begin", {"pre_" + str(i): "2" for i in range(1, 21)})
+        assert "/ready" in url and "quizForm" not in page and "Начать задания" in page
+        status, url, page = request(person, "/launch", {})
         assert "/test" in url and "quizForm" in page
         assert "Таблица лидеров" not in page
         assert "Соревновательный режим" not in page
 
         # Question IDs and option indices are read from the quiz HTML.
-        names = re.findall(r'name="answer_([^"]+)" value="0"', page)
-        assert names, "No quiz questions"
-        answers = {"answer_" + name: "0" for name in names}
+        assert "Введите только число" in page and "Введите только букву" in page
+        names = re.findall(r'name="answer_([^"]+)"', page)
+        assert set(names) == {"q1", "q2", "q3", "q4", "q5"}, names
+        answers = {"answer_q1": " 29 ", "answer_q2": "1", "answer_q3": " х ", "answer_q4": " 148 ", "answer_q5": "2"}
         answers.update({"time_" + name: "250" for name in names})
         status, url, result = request(person, "/finish", answers)
         assert status == 200 and "/result" in url
-        assert "Ваш результат" in result
+        assert "Ваш результат" in result and "5 <small>/ 5</small>" in result
         assert ("Таблица лидеров" in result) == is_ranking
 
         status, url, _ = request(person, "/finish", answers)
@@ -98,6 +101,7 @@ def run():
         assert "/survey" in url and "post_20" in survey
         status, url, thanks = request(person, "/survey", {"post_" + str(i): "3" for i in range(1, 21)})
         assert "/thanks" in url and "Благодарим за участие" in thanks
+        assert "thank-you-cat" not in thanks and "Спасибо, что помогаете науке" not in thanks
 
     # Signed manual links must be visible only in admin and bypass random quota.
     headers = {"X-Admin-Key": ADMIN}
