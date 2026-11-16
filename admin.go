@@ -41,7 +41,7 @@ func (a *App) adminDashboard(w http.ResponseWriter,r *http.Request) {
  w.Header().Set("Cache-Control","no-store")
  w.Header().Set("X-Content-Type-Options","nosniff")
  w.Header().Set("Content-Type","text/html; charset=utf-8")
- fmt.Fprint(w,`<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Аналитика · Experiment</title><link rel="stylesheet" href="/static/admin.css"></head><body><main><h1>Аналитика эксперимента</h1><p>Описательные показатели по завершённым тестам. Незаполненные группы не интерпретируются как нулевой результат.</p><section class="card"><h2>Сравнение групп</h2><div class="scroll"><table><thead><tr><th>Группа</th><th>Зарегистрированы</th><th>Завершили</th><th>Средний балл</th><th>До</th><th>После</th><th>Δ напряжения</th><th>Время, с</th></tr></thead><tbody>`)
+ fmt.Fprint(w,`<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Аналитика · Experiment</title><link rel="stylesheet" href="/static/admin.css"></head><body><main><h1>Аналитика эксперимента</h1><p>Описательные показатели по завершённым тестам. Незаполненные группы не интерпретируются как нулевой результат.</p><section class="card"><h2>Сравнение групп</h2><div class="scroll"><table><thead><tr><th>Группа</th><th>Зарегистрированы</th><th>Завершили</th><th>Средний балл</th><th>До (20–80)</th><th>После (20–80)</th><th>Δ тревожности</th><th>Время, с</th></tr></thead><tbody>`)
  for _,g:=range groups {
   fmt.Fprintf(w,"<tr><th>%s</th><td>%d</td><td>%d</td>",template.HTMLEscapeString(groupLabel(g.Name)),g.Started,g.Finished)
   if g.Finished==0 {fmt.Fprint(w,"<td colspan=5>Нет завершённых тестов</td></tr>");continue}
@@ -62,9 +62,9 @@ func percent(ok,total int) string {if total==0 {return "—"};return fmt.Sprintf
 func (a *App) adminGroups(ctx context.Context)([]adminGroup,error) {
  rows,err:=a.db.Query(ctx,`SELECT grp,count(*)::int,count(*) FILTER (WHERE finished_at IS NOT NULL)::int,
  COALESCE(avg(score) FILTER (WHERE finished_at IS NOT NULL),0)::float8,
- COALESCE(avg(baseline_stress) FILTER (WHERE finished_at IS NOT NULL),0)::float8,
- COALESCE(avg(stress) FILTER (WHERE finished_at IS NOT NULL),0)::float8,
- COALESCE(avg(stress-baseline_stress) FILTER (WHERE finished_at IS NOT NULL),0)::float8,
+ COALESCE(avg(pre_score) FILTER (WHERE finished_at IS NOT NULL),0)::float8,
+ COALESCE(avg(post_score) FILTER (WHERE finished_at IS NOT NULL),0)::float8,
+ COALESCE(avg(post_score-pre_score) FILTER (WHERE finished_at IS NOT NULL),0)::float8,
  COALESCE(avg(extract(epoch from finished_at-test_started_at)) FILTER (WHERE finished_at IS NOT NULL AND test_started_at IS NOT NULL),0)::float8
  FROM attempts GROUP BY grp ORDER BY grp`)
  if err!=nil{return nil,err};defer rows.Close()
@@ -88,7 +88,7 @@ func (a *App) adminQuestions(ctx context.Context)([]adminQuestion,error) {
  return out,nil
 }
 func (a *App) adminParticipants(ctx context.Context)([]adminParticipant,error) {
- rows,err:=a.db.Query(ctx,`SELECT id,name,grp,finished_at IS NOT NULL,score,baseline_stress,stress,
+ rows,err:=a.db.Query(ctx,`SELECT id,name,grp,finished_at IS NOT NULL,score,pre_score,post_score,
  CASE WHEN finished_at IS NOT NULL AND test_started_at IS NOT NULL THEN extract(epoch from finished_at-test_started_at)::float8 END
  FROM attempts ORDER BY id DESC LIMIT 200`)
  if err!=nil{return nil,err};defer rows.Close()
