@@ -23,7 +23,7 @@ import (
 type Question struct { ID string `json:"id"`; Text string `json:"text"`; Options []string `json:"options"`; Input string `json:"input,omitempty"`; Answer string `json:"answer,omitempty"`; Correct int `json:"correct"` }
 type Quiz struct { ID string `json:"id"`; Title string `json:"title"`; Description string `json:"description"`; Questions []Question `json:"questions"` }
 type App struct { db *pgxpool.Pool; quiz Quiz; page *template.Template }
-type Attempt struct { ID int64; Name, Group string; Finished bool; Score int; TestStarted bool; Ready bool; DeadlineUnix int64 }
+type Attempt struct { ID int64; Name, Group string; Finished bool; Score int; TestStarted bool; Ready bool; DeadlineUnix int64; ServerNowUnix int64 }
 type Row struct { Name string `json:"name"`; Score int `json:"score"`; Total int `json:"total"` }
 type PageData struct { Quiz Quiz; Attempt Attempt; Ranking []Row; Error string; Total int; JoinPath string; InviteGroup string; InviteKey string; SurveyItems []string; SurveyMode string; SurveyError string; SurveyDone bool }
 
@@ -66,7 +66,6 @@ func main() {
  mux.HandleFunc("POST /begin",a.begin)
  mux.HandleFunc("GET /ready",a.ready)
  mux.HandleFunc("POST /launch",a.launch)
- mux.HandleFunc("POST /api/start-clock",a.startClock)
  mux.HandleFunc("GET /test",a.test)
  mux.HandleFunc("POST /finish",a.finish)
  mux.HandleFunc("GET /result",a.result)
@@ -173,18 +172,10 @@ func (a *App) ready(w http.ResponseWriter,r *http.Request) {
 }
 func (a *App) launch(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil {http.Error(w,"Unauthorized",401);return}
+ if at.Finished {http.Redirect(w,r,"/result",303);return}
  if !at.Ready {http.Redirect(w,r,"/briefing",303);return}
+ if _,err=a.db.Exec(r.Context(),"UPDATE attempts SET test_started_at=COALESCE(test_started_at,clock_timestamp()) WHERE id=$1 AND ready_at IS NOT NULL AND finished_at IS NULL",at.ID);err!=nil {http.Error(w,"Database error",500);return}
  http.Redirect(w,r,"/test",303)
-}
-func (a *App) startClock(w http.ResponseWriter,r *http.Request) {
- at,err:=a.current(r);if err!=nil {http.Error(w,"Unauthorized",401);return}
- if !at.Ready||at.Finished {http.Error(w,"Test unavailable",409);return}
- var deadline int64
- err=a.db.QueryRow(r.Context(),`UPDATE attempts SET test_started_at=COALESCE(test_started_at,clock_timestamp()) WHERE id=$1 AND ready_at IS NOT NULL AND finished_at IS NULL RETURNING (extract(epoch from test_started_at+interval '10 minutes')*1000)::bigint`,at.ID).Scan(&deadline)
- if err!=nil {http.Error(w,"Database error",500);return}
- w.Header().Set("Cache-Control","no-store")
- w.Header().Set("Content-Type","application/json")
- fmt.Fprintf(w,`{"deadline":%d,"serverNow":%d}`,deadline,time.Now().UnixMilli())
 }
 func (a *App) test(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil {http.Redirect(w,r,"/",303);return}
@@ -193,7 +184,9 @@ func (a *App) test(w http.ResponseWriter,r *http.Request) {
  // Copy questions without correct answer indices to avoid exposing answer keys.
  q:=a.quiz;q.Questions=append([]Question(nil),q.Questions...)
  for i:=range q.Questions {q.Questions[i].Correct=-1;q.Questions[i].Answer=""}
- 
+ if !at.TestStarted {http.Redirect(w,r,"/ready",303);return}
+ if err=a.db.QueryRow(r.Context(),"SELECT (extract(epoch from test_started_at + interval '10 minutes')*1000)::bigint, (extract(epoch from clock_timestamp())*1000)::bigint FROM attempts WHERE id=$1",at.ID).Scan(&at.DeadlineUnix,&at.ServerNowUnix);err!=nil {http.Error(w,"Database error",500);return}
+ w.Header().Set("Cache-Control","no-store")
  a.render(w,PageData{Quiz:q,Attempt:at,Total:len(q.Questions)})
 }
 func (a *App) finish(w http.ResponseWriter,r *http.Request) {
@@ -299,5 +292,5 @@ const htmlPage = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><me
 <section class="panel"><div class="timer" id="timer" role="timer" aria-live="off">10:00</div><p class="muted">Через 10 минут ответы отправятся автоматически. Если не знаете ответ, можно оставить вопрос пустым.</p></section>
 <div class="progress" role="progressbar" aria-label="Прогресс теста" aria-valuemin="0" aria-valuemax="{{.Total}}" aria-valuenow="0" id="progress"><div id="progressFill"></div></div>
 <form id="quizForm" method="post" action="/finish">{{range $i,$q:=.Quiz.Questions}}<fieldset class="question" data-q="{{$q.ID}}"><legend class="question-num">Задание {{add $i 1}}</legend><h3>{{$q.Text}}</h3>{{if $q.Input}}<label class="field-title" for="answer_{{$q.ID}}">Введите только {{if eq $q.Input "number"}}число{{else}}букву{{end}}</label><input class="text-input" type="text" id="answer_{{$q.ID}}" name="answer_{{$q.ID}}" autocomplete="off" inputmode="{{if eq $q.Input "number"}}numeric{{else}}text{{end}}">{{else}}{{range $j,$option:=$q.Options}}<label class="option"><input type="radio" name="answer_{{$q.ID}}" value="{{$j}}"><span>{{$option}}</span></label>{{end}}{{end}}<input type="hidden" name="time_{{$q.ID}}" value="0"></fieldset>{{end}}<div class="actions"><button class="btn" id="submitBtn" type="submit" disabled>Завершить задания →</button></div></form>
-<script>(function(){const form=document.getElementById('quizForm'),questions=Array.from(form.querySelectorAll('[data-q]')),started=Date.now(),progress=document.getElementById('progress'),fill=document.getElementById('progressFill'),count=document.getElementById('answered'),timer=document.getElementById('timer'),deadline=0,serverOffset=0;let sent=false;function update(){let done=0;questions.forEach(q=>{if(q.querySelector('input[type=radio]:checked')||(q.querySelector('input[type=text]')&&q.querySelector('input[type=text]').value.trim()))done++});count.textContent=done;fill.style.width=(done/questions.length*100)+'%';progress.setAttribute('aria-valuenow',done);document.getElementById('submitBtn').disabled=done!==questions.length||sent}questions.forEach(q=>{const elapsed=q.querySelector('input[type=hidden]');q.querySelectorAll('input[type=radio],input[type=text]').forEach(r=>r.addEventListener(r.type==='text'?'input':'change',()=>{elapsed.value=String(Date.now()-started);update()}))});function tick(){if(!deadline)return;const left=Math.max(0,Math.ceil((deadline-(Date.now()+serverOffset))/1000));timer.textContent=String(Math.floor(left/60)).padStart(2,'0')+':'+String(left%60).padStart(2,'0');if(left===0&&!sent){sent=true;form.submit()}}form.addEventListener('submit',event=>{if(questions.some(q=>!q.querySelector('input[type=radio]:checked')&&!(q.querySelector('input[type=text]')&&q.querySelector('input[type=text]').value.trim()))){event.preventDefault();return}sent=true;document.getElementById('submitBtn').disabled=true});update();fetch("/api/start-clock",{method:"POST",credentials:"same-origin"}).then(async response=>{if(!response.ok)throw Error("Не удалось запустить таймер");return response.json()}).then(data=>{deadline=data.deadline;serverOffset=data.serverNow-Date.now();tick();setInterval(tick,200)}).catch(()=>{timer.textContent="Ошибка запуска";form.querySelectorAll("input,button").forEach(el=>el.disabled=true);alert("Не удалось запустить таймер. Обновите страницу.")})})();</script>
+<script>(function(){const form=document.getElementById('quizForm'),questions=Array.from(form.querySelectorAll('[data-q]')),started=Date.now(),progress=document.getElementById('progress'),fill=document.getElementById('progressFill'),count=document.getElementById('answered'),timer=document.getElementById('timer'),deadline=Number("{{.Attempt.DeadlineUnix}}"),serverNow=Number("{{.Attempt.ServerNowUnix}}"),loadedAt=performance.now();let sent=false;function update(){let done=0;questions.forEach(q=>{if(q.querySelector('input[type=radio]:checked')||(q.querySelector('input[type=text]')&&q.querySelector('input[type=text]').value.trim()))done++});count.textContent=done;fill.style.width=(done/questions.length*100)+'%';progress.setAttribute('aria-valuenow',done);document.getElementById('submitBtn').disabled=done!==questions.length||sent}questions.forEach(q=>{const elapsed=q.querySelector('input[type=hidden]');q.querySelectorAll('input[type=radio],input[type=text]').forEach(r=>r.addEventListener(r.type==='text'?'input':'change',()=>{elapsed.value=String(Date.now()-started);update()}))});function tick(){if(!deadline)return;const left=Math.max(0,Math.ceil((deadline-(serverNow+performance.now()-loadedAt))/1000));timer.textContent=String(Math.floor(left/60)).padStart(2,'0')+':'+String(left%60).padStart(2,'0');if(left===0&&!sent){sent=true;form.submit()}}form.addEventListener('submit',event=>{if(questions.some(q=>!q.querySelector('input[type=radio]:checked')&&!(q.querySelector('input[type=text]')&&q.querySelector('input[type=text]').value.trim()))){event.preventDefault();return}sent=true;document.getElementById('submitBtn').disabled=true});update();tick();setInterval(tick,200)})();</script>
 {{end}}</main><script>(function(){document.querySelectorAll("form[data-complete-form]").forEach(form=>{const button=form.querySelector("button[type=submit]");if(!button)return;function update(){let complete;if(form.dataset.completeForm==="consent"){complete=!!form.querySelector('input[name="consent"]:checked')&&!!form.querySelector('input[name="name"]').value.trim()}else{const fields=form.querySelectorAll(".survey-item");complete=fields.length===20&&Array.from(fields).every(field=>!!field.querySelector("input[type=radio]:checked"))}button.disabled=!complete}form.addEventListener("input",update);form.addEventListener("change",update);form.addEventListener("submit",event=>{update();if(button.disabled)event.preventDefault()});update()})})();</script><footer class="foot">Учебное исследование · Спасибо за участие</footer></div></body></html>`
