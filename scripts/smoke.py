@@ -58,7 +58,7 @@ def run():
         status, _, landing = request(person, "/")
         assert status == 200 and "name=\"name\"" in landing and "pre_1" not in landing
         status, url, briefing = request(person, "/start", {
-            "name": "Pilot " + str(number),
+            "name": "Pilot" + str(number),
             "consent": "yes",
         })
         assert status == 200 and "/briefing" in url, url
@@ -90,7 +90,7 @@ def run():
         assert "/result" in url, "Second submission should redirect to result"
         if is_ranking:
             status, _, ranking = request(person, "/api/leaderboard")
-            assert "Pilot " + str(number) in ranking
+            assert "Pilot" + str(number) in ranking
         else:
             expect_forbidden(person, "/api/leaderboard")
 
@@ -111,7 +111,7 @@ def run():
     for number in range(3, 61):
         person = client()
         status, url, briefing = request(person, "/start", {
-            "name": "Pilot " + str(number),
+            "name": "Pilot" + str(number),
             "consent": "yes",
         })
         assert "/briefing" in url
@@ -120,10 +120,10 @@ def run():
 
     headers = {"X-Admin-Key": ADMIN}
     status, _, dashboard = request(admin, "/admin", headers=headers)
-    assert status == 200 and "Pilot 1" in dashboard and "Pilot 2" in dashboard
+    assert status == 200 and "Pilot1" in dashboard and "Pilot2" in dashboard
     assert "Сравнение групп" in dashboard
     status, _, csv = request(admin, "/admin/export", headers=headers)
-    assert status == 200 and "pre_answers_1_4" in csv and "Pilot 1" in csv
+    assert status == 200 and "pre_answers_1_4" in csv and "Pilot1" in csv
     print("PASS: 60 balanced random assignments, briefing, test, result, ranking, admin and CSV")
 
 
