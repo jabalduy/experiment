@@ -233,21 +233,10 @@ func (a *App) finish(w http.ResponseWriter,r *http.Request) {
  if err=tx.Commit(ctx);err!=nil {http.Error(w,"Database error",500);return}
  http.Redirect(w,r,"/result",303)
 }
-// Demo entries are deliberately kept outside attempts/answers and excluded from all research statistics.
-func demoRanking(total int) []Row {
- entries:=[]struct{name string;score int}{
-  {"Александр",5},{"Мария",5},{"Дмитрий",4},{"Анна",4},{"Максим",4},
-  {"Екатерина",4},{"Илья",3},{"София",3},{"Артём",3},{"Полина",3},
-  {"Никита",2},{"Дарья",2},{"Кирилл",2},{"Анастасия",1},{"Егор",1},
- }
- out:=make([]Row,0,len(entries))
- for _,v:=range entries {out=append(out,Row{Name:v.name,Score:v.score,Total:total,Demo:true})}
- return out
-}
 func (a *App) getRanking(ctx context.Context) ([]Row,error) {
  rows,err:=a.db.Query(ctx,"SELECT name,score FROM attempts WHERE grp='ranking' AND finished_at IS NOT NULL ORDER BY score DESC,finished_at ASC LIMIT 50")
  if err!=nil{return nil,err};defer rows.Close()
- out:=demoRanking(len(a.quiz.Questions));for rows.Next(){var v Row;if err=rows.Scan(&v.Name,&v.Score);err!=nil{return nil,err};v.Total=len(a.quiz.Questions);out=append(out,v)}
+ out:=[]Row{};for rows.Next(){var v Row;if err=rows.Scan(&v.Name,&v.Score);err!=nil{return nil,err};v.Total=len(a.quiz.Questions);out=append(out,v)}
  if err=rows.Err();err!=nil{return nil,err}
  for i:=1;i<len(out);i++ {for j:=i;j>0&&out[j].Score>out[j-1].Score;j-- {out[j],out[j-1]=out[j-1],out[j]}}
  if len(out)>50 {out=out[:50]}
@@ -307,7 +296,7 @@ const htmlPage = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><me
 <section class="panel"><span class="eyebrow">Шаг 04 · Оценка состояния</span><h1>Как вы чувствуете себя сейчас?</h1><div class="survey-intro"><p>Теперь, пожалуйста, оцените представленные ниже утверждения, опираясь на то, как вы чувствуете себя в данный момент.</p><p>Для каждого утверждения выберите один из четырёх вариантов ответа:</p><p><strong>1</strong> — Нет, это не так<br><strong>2</strong> — Пожалуй, так<br><strong>3</strong> — Верно<br><strong>4</strong> — Совершенно верно</p><p>Пожалуйста, отвечайте искренне, ориентируясь на своё текущее состояние.</p></div><form action="/survey" method="post" data-complete-form="survey"><div class="survey-list">{{range $i,$item:=.SurveyItems}}<fieldset class="survey-item"><legend><strong>{{add $i 1}}.</strong> {{$item}}</legend><div class="scale four">{{range seq4}}<label><input type="radio" name="post_{{add $i 1}}" value="{{.}}" required><span>{{.}}</span></label>{{end}}</div></fieldset>{{end}}</div><div class="actions"><button class="btn" type="submit">Завершить исследование →</button></div></form></section>
 {{else if .Attempt.Finished}}
 <section class="panel"><span class="eyebrow">Шаг 03 · Результат</span><h1>Ваш результат</h1><div class="results"><div class="score">{{.Attempt.Score}} <small>/ {{.Total}}</small></div><p>Правильных ответов</p></div>
-{{if eq .Attempt.Group "ranking"}}<hr class="divider"><h2>Таблица лидеров</h2><p>Рейтинг включает 15 демонстрационных записей, не являющихся результатами реальных участников. Они не учитываются в статистике исследования и квоте набора.</p><ol class="leaderboard">{{range $i,$row:=.Ranking}}<li><span><span class="place">{{add $i 1}}.</span>{{$row.Name}}{{if $row.Demo}} <small>(демо)</small>{{end}}</span><strong>{{$row.Score}} / {{$row.Total}}</strong></li>{{else}}<li>Пока нет результатов</li>{{end}}</ol>{{else}}<p class="note">Ваш результат используется только в рамках исследования.</p>{{end}}
+{{if eq .Attempt.Group "ranking"}}<hr class="divider"><h2>Таблица лидеров</h2><p>Результаты участников соревновательной группы. При равных баллах выше находится тот, кто завершил тест раньше.</p><ol class="leaderboard">{{range $i,$row:=.Ranking}}<li><span><span class="place">{{add $i 1}}.</span>{{$row.Name}}</span><strong>{{$row.Score}} / {{$row.Total}}</strong></li>{{else}}<li>Пока нет результатов</li>{{end}}</ol>{{else}}<p class="note">Ваш результат используется только в рамках исследования.</p>{{end}}
 {{if not .SurveyDone}}<hr class="divider"><p>Остался последний этап — оценить своё текущее состояние.</p><div class="actions"><a class="btn" href="/survey">Продолжить →</a></div>{{else}}<div class="actions"><a class="btn" href="/thanks">К благодарности →</a></div>{{end}}</section>
 {{else if eq .Total -1}}
 <section class="panel"><span class="eyebrow">Шаг 02 · Инструкция</span><h1>Перед началом</h1>
