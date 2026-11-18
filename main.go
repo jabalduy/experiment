@@ -50,6 +50,12 @@ func main() {
  pre_answers JSONB,post_answers JSONB,pre_score INT,post_score INT,
  assignment_source TEXT NOT NULL DEFAULT 'random', name_set BOOLEAN NOT NULL DEFAULT TRUE
  );
+ CREATE TABLE IF NOT EXISTS demo_participants (
+ id SERIAL PRIMARY KEY,
+ name VARCHAR(40) NOT NULL,
+ score INTEGER NOT NULL CHECK (score BETWEEN 0 AND 5),
+ created_at TIMESTAMPTZ DEFAULT NOW()
+ );
  CREATE TABLE IF NOT EXISTS answers (
  attempt_id BIGINT NOT NULL REFERENCES attempts(id),
  question_id TEXT NOT NULL, choice INT NOT NULL, raw_answer TEXT, correct BOOLEAN NOT NULL,
@@ -234,13 +240,23 @@ func (a *App) finish(w http.ResponseWriter,r *http.Request) {
  http.Redirect(w,r,"/result",303)
 }
 func (a *App) getRanking(ctx context.Context) ([]Row,error) {
- rows,err:=a.db.Query(ctx,"SELECT name,score FROM attempts WHERE grp='ranking' AND finished_at IS NOT NULL ORDER BY score DESC,finished_at ASC LIMIT 50")
- if err!=nil{return nil,err};defer rows.Close()
- out:=[]Row{};for rows.Next(){var v Row;if err=rows.Scan(&v.Name,&v.Score);err!=nil{return nil,err};v.Total=len(a.quiz.Questions);out=append(out,v)}
- if err=rows.Err();err!=nil{return nil,err}
- for i:=1;i<len(out);i++ {for j:=i;j>0&&out[j].Score>out[j-1].Score;j-- {out[j],out[j-1]=out[j-1],out[j]}}
- if len(out)>50 {out=out[:50]}
- return out,nil
+ // Demo rows live in a separate table and never enter attempts, exports or recruitment counts.
+ rows,err:=a.db.Query(ctx,`SELECT name,score FROM (
+   SELECT name,score,finished_at AS sort_time FROM attempts
+     WHERE grp='ranking' AND finished_at IS NOT NULL
+   UNION ALL
+   SELECT name,score,created_at AS sort_time FROM demo_participants
+ ) ranking_rows ORDER BY score DESC,sort_time ASC,name ASC LIMIT 50`)
+ if err!=nil{return nil,err}
+ defer rows.Close()
+ out:=[]Row{}
+ for rows.Next() {
+  var v Row
+  if err=rows.Scan(&v.Name,&v.Score);err!=nil{return nil,err}
+  v.Total=len(a.quiz.Questions)
+  out=append(out,v)
+ }
+ return out,rows.Err()
 }
 func (a *App) leaderboard(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil||at.Group!="ranking" {http.Error(w,"Forbidden",403);return}
