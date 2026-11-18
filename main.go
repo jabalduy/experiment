@@ -70,6 +70,8 @@ func main() {
  mux.HandleFunc("POST /start",a.start)
  mux.HandleFunc("GET /briefing",a.briefing)
  mux.HandleFunc("POST /begin",a.begin)
+ mux.HandleFunc("GET /before",a.before)
+ mux.HandleFunc("POST /before",a.proceedBefore)
  mux.HandleFunc("GET /code",a.codePage)
  mux.HandleFunc("GET /ready",a.ready)
  mux.HandleFunc("POST /launch",a.launch)
@@ -173,6 +175,18 @@ func (a *App) begin(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil {http.Redirect(w,r,"/",303);return}
  if at.Finished {http.Redirect(w,r,"/result",303);return}
  if at.TestStarted {http.Redirect(w,r,"/test",303);return}
+ http.Redirect(w,r,"/before",303)
+}
+func (a *App) before(w http.ResponseWriter,r *http.Request) {
+ at,err:=a.current(r);if err!=nil {http.Redirect(w,r,"/",303);return}
+ if at.Finished {http.Redirect(w,r,"/result",303);return}
+ if at.TestStarted {http.Redirect(w,r,"/test",303);return}
+ a.render(w,PageData{Quiz:a.quiz,Attempt:at,Total:-4})
+}
+func (a *App) proceedBefore(w http.ResponseWriter,r *http.Request) {
+ at,err:=a.current(r);if err!=nil {http.Redirect(w,r,"/",303);return}
+ if at.Finished {http.Redirect(w,r,"/result",303);return}
+ if at.TestStarted {http.Redirect(w,r,"/test",303);return}
  if at.Group=="ranking" {http.Redirect(w,r,"/code",303);return}
  a.launch(w,r)
 }
@@ -184,11 +198,7 @@ func (a *App) codePage(w http.ResponseWriter,r *http.Request) {
  a.render(w,PageData{Quiz:a.quiz,Attempt:at,Total:-5})
 }
 func (a *App) ready(w http.ResponseWriter,r *http.Request) {
- at,err:=a.current(r);if err!=nil {http.Redirect(w,r,"/",303);return}
- if at.Finished {http.Redirect(w,r,"/result",303);return}
- if at.TestStarted {http.Redirect(w,r,"/test",303);return}
- if !at.Named {http.Redirect(w,r,"/briefing",303);return}
- a.render(w,PageData{Quiz:a.quiz,Attempt:at,Total:-4})
+ http.Redirect(w,r,"/before",303)
 }
 func (a *App) launch(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil {http.Error(w,"Unauthorized",401);return}
@@ -199,7 +209,7 @@ func (a *App) launch(w http.ResponseWriter,r *http.Request) {
 func (a *App) test(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil {http.Redirect(w,r,"/",303);return}
  if at.Finished {http.Redirect(w,r,"/result",303);return}
- if !at.Ready {http.Redirect(w,r,"/briefing",303);return}
+ if !at.Ready {http.Redirect(w,r,"/before",303);return}
  // Copy questions without correct answer indices to avoid exposing answer keys.
  q:=a.quiz;q.Questions=append([]Question(nil),q.Questions...)
  for i:=range q.Questions {q.Questions[i].Correct=-1;q.Questions[i].Answer=""}
@@ -313,13 +323,13 @@ const htmlPage = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><me
 {{if eq .Attempt.Group "ranking"}}<p class="muted">Ваш код участника: <strong>{{.Attempt.Code}}</strong></p><hr class="divider"><h2>Таблица лидеров</h2><p>Результаты участников соревновательной группы. При равных баллах выше находится тот, кто завершил тест раньше.</p><ol class="leaderboard">{{range $i,$row:=.Ranking}}<li{{if and $.Attempt.Code (eq $row.Name $.Attempt.Code)}} class="leaderboard-self"{{end}}><span><span class="place">{{add $i 1}}.</span>{{$row.Name}}{{if and $.Attempt.Code (eq $row.Name $.Attempt.Code)}} <small>(Вы)</small>{{end}}</span><strong>{{$row.Score}} / {{$row.Total}}</strong></li>{{else}}<li>Пока нет результатов</li>{{end}}</ol>{{end}}
 {{if not .SurveyDone}}<hr class="divider"><p>Остался последний этап — оценить своё текущее состояние.</p><div class="actions"><a class="btn" href="/survey">Продолжить →</a></div>{{else}}<div class="actions"><a class="btn" href="/thanks">К благодарности →</a></div>{{end}}</section>
 {{else if eq .Total -1}}
-<section class="panel"><span class="eyebrow">Шаг 02 · Инструкция</span><h1>Перед началом</h1>
-
-<p>Время на задания — <strong>10 минут</strong>.</p><p>Вам предстоит выполнить 5 заданий на логическое мышление и поиск закономерностей.</p><p>Пожалуйста, выполняйте задания самостоятельно, без использования искусственного интеллекта, поисковых систем и помощи других людей.</p><p>При необходимости можно пользоваться бумагой и ручкой для записей и вычислений.</p><p>Если задание покажется сложным, постарайтесь найти решение самостоятельно.</p><p><strong>Желаем удачи!</strong></p><form action="/begin" method="post"><div class="actions"><button class="btn" type="submit">Продолжить →</button></div></form></section>
+<section class="panel"><span class="eyebrow">Шаг 02 · Инструкция</span><h1>Инструкция</h1>
+{{if eq .Attempt.Group "ranking"}}<p>Вам предстоит выполнить 5 заданий на логическое мышление и поиск закономерностей за ограниченное время. Ваш результат будет сопоставлен с результатами других участников. После выполнения задания вы сможете ознакомиться с распределением результатов между всеми участниками в рейтинге. Постарайтесь выполнить задания как можно точнее.</p>{{else}}<p>Вам предстоит выполнить 5 заданий на логическое мышление и поиск закономерностей за ограниченное время. Вы увидите свой результат после выполнения заданий, и он будет использован только в рамках исследования. Постарайтесь выполнить задания как можно точнее.</p>{{end}}
+<form action="/begin" method="post"><div class="actions"><button class="btn" type="submit">Продолжить →</button></div></form></section>
 {{else if eq .Total -5}}
 <section class="panel"><span class="eyebrow">Шаг 03 · Код участника</span><h1>Ваш код участника</h1><p>Запомните или запишите этот код. По нему вы сможете найти свой результат в рейтинге.</p><div style="text-align:center;padding:36px 12px;margin:24px 0;background:#eef2ff;border:1px solid #c7d2fe;border-radius:18px"><strong style="font-size:clamp(42px,9vw,76px);letter-spacing:.07em;color:#3458df">{{.Attempt.Code}}</strong></div><p class="muted">Код закреплён за вами и не меняется. Таймер начнётся после нажатия кнопки.</p><form method="post" action="/launch"><div class="actions"><button class="btn" type="submit">Начать задания →</button></div></form></section>
 {{else if eq .Total -4}}
-<section class="panel"><span class="eyebrow">Шаг 03 · Перед заданиями</span><h1>Перед началом таймера</h1><p>Вам предстоит выполнить 5 заданий на логическое мышление и поиск закономерностей.</p><p>Пожалуйста, выполняйте задания самостоятельно, без использования искусственного интеллекта, поисковых систем и помощи других людей.</p><p>При необходимости можно пользоваться бумагой и ручкой для записей и вычислений.</p><p>Если задание покажется сложным, постарайтесь найти решение самостоятельно.</p><p><strong>Желаем удачи!</strong></p><form method="post" action="/launch"><div class="actions"><button class="btn" type="submit">Начать задания →</button></div></form></section>
+<section class="panel"><span class="eyebrow">Шаг 03 · Перед заданиями</span><h1>Перед началом</h1><p>Пожалуйста, выполняйте задания самостоятельно, без использования искусственного интеллекта, поисковых систем и помощи других людей.</p><p>При необходимости можно пользоваться бумагой и ручкой для записей и вычислений.</p><p>Если задание покажется сложным, постарайтесь найти решение самостоятельно.</p><p><strong>Желаем удачи!</strong></p><form method="post" action="/before"><div class="actions"><button class="btn" type="submit">Продолжить →</button></div></form></section>
 {{else}}
 <div class="quiz-top"><div><span class="eyebrow">Шаг 03 · Задания</span><h1>Логические задачи</h1></div><span class="tag"><span id="answered">0</span> / {{.Total}} ответов</span></div>
 <section class="panel"><div class="timer" id="timer" role="timer" aria-live="off">10:00</div><p class="muted">Через 10 минут ответы отправятся автоматически. Если не знаете ответ, можно оставить вопрос пустым.</p></section>
