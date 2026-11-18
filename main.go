@@ -23,7 +23,7 @@ import (
 type Question struct { ID string `json:"id"`; Text string `json:"text"`; Options []string `json:"options"`; Input string `json:"input,omitempty"`; Answer string `json:"answer,omitempty"`; Correct int `json:"correct"` }
 type Quiz struct { ID string `json:"id"`; Title string `json:"title"`; Description string `json:"description"`; Questions []Question `json:"questions"` }
 type App struct { db *pgxpool.Pool; quiz Quiz; page *template.Template }
-type Attempt struct { ID int64; Name, Group string; Finished bool; Score int; TestStarted bool; Ready bool; Named bool; DeadlineUnix int64; ServerNowUnix int64 }
+type Attempt struct { ID int64; Name, Group, Code string; Finished bool; Score int; TestStarted bool; Ready bool; Named bool; DeadlineUnix int64; ServerNowUnix int64 }
 type Row struct { Name string `json:"name"`; Score int `json:"score"`; Total int `json:"total"`; Demo bool `json:"demo"` }
 type PageData struct { Quiz Quiz; Attempt Attempt; Ranking []Row; Error string; Total int; JoinPath string; InviteGroup string; InviteKey string; SurveyItems []string; SurveyMode string; SurveyError string; SurveyDone bool }
 
@@ -48,7 +48,7 @@ func main() {
  test_started_at TIMESTAMPTZ,
  ready_at TIMESTAMPTZ,
  pre_answers JSONB,post_answers JSONB,pre_score INT,post_score INT,
- assignment_source TEXT NOT NULL DEFAULT 'random', name_set BOOLEAN NOT NULL DEFAULT TRUE
+ assignment_source TEXT NOT NULL DEFAULT 'random', name_set BOOLEAN NOT NULL DEFAULT TRUE, participant_code TEXT UNIQUE
  );
  CREATE TABLE IF NOT EXISTS demo_participants (
  id SERIAL PRIMARY KEY,
@@ -62,7 +62,7 @@ func main() {
  elapsed_ms INT NOT NULL DEFAULT 0, PRIMARY KEY(attempt_id,question_id)
  );`
  if _,err=db.Exec(ctx,schema);err!=nil {log.Fatal(err)}
- if _,err=db.Exec(ctx,`ALTER TABLE attempts ADD COLUMN IF NOT EXISTS name_set BOOLEAN NOT NULL DEFAULT TRUE; ALTER TABLE answers ADD COLUMN IF NOT EXISTS raw_answer TEXT; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS baseline_stress INT CHECK(baseline_stress BETWEEN 1 AND 7); ALTER TABLE attempts ADD COLUMN IF NOT EXISTS ranking_seen BOOLEAN NOT NULL DEFAULT FALSE; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS test_started_at TIMESTAMPTZ; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS ready_at TIMESTAMPTZ; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS pre_answers JSONB; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS post_answers JSONB; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS pre_score INT; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS post_score INT; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS assignment_source TEXT NOT NULL DEFAULT 'random'`);err!=nil {log.Fatal(err)}
+ if _,err=db.Exec(ctx,`ALTER TABLE attempts ADD COLUMN IF NOT EXISTS participant_code TEXT; CREATE UNIQUE INDEX IF NOT EXISTS attempts_code_unique ON attempts(participant_code); ALTER TABLE attempts ADD COLUMN IF NOT EXISTS name_set BOOLEAN NOT NULL DEFAULT TRUE; ALTER TABLE answers ADD COLUMN IF NOT EXISTS raw_answer TEXT; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS baseline_stress INT CHECK(baseline_stress BETWEEN 1 AND 7); ALTER TABLE attempts ADD COLUMN IF NOT EXISTS ranking_seen BOOLEAN NOT NULL DEFAULT FALSE; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS test_started_at TIMESTAMPTZ; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS ready_at TIMESTAMPTZ; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS pre_answers JSONB; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS post_answers JSONB; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS pre_score INT; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS post_score INT; ALTER TABLE attempts ADD COLUMN IF NOT EXISTS assignment_source TEXT NOT NULL DEFAULT 'random'`);err!=nil {log.Fatal(err)}
  a:=&App{db:db,quiz:q,page:template.Must(template.New("page").Funcs(template.FuncMap{"add":func(a,b int)int{return a+b},"seq4":func()[]int{return []int{1,2,3,4}}}).Parse(htmlPage))}
  mux:=http.NewServeMux()
  mux.HandleFunc("GET /",a.home)
@@ -70,8 +70,7 @@ func main() {
  mux.HandleFunc("POST /start",a.start)
  mux.HandleFunc("GET /briefing",a.briefing)
  mux.HandleFunc("POST /begin",a.begin)
- mux.HandleFunc("GET /name",a.namePage)
- mux.HandleFunc("POST /name",a.saveName)
+ mux.HandleFunc("GET /code",a.codePage)
  mux.HandleFunc("GET /ready",a.ready)
  mux.HandleFunc("POST /launch",a.launch)
  mux.HandleFunc("GET /test",a.test)
@@ -94,7 +93,7 @@ func (a *App) render(w http.ResponseWriter,data PageData) {
 }
 func (a *App) home(w http.ResponseWriter,r *http.Request) {
  at,_:=a.current(r)
- if at.ID!=0 {if at.Finished {http.Redirect(w,r,"/result",http.StatusSeeOther)} else if at.TestStarted {http.Redirect(w,r,"/test",http.StatusSeeOther)} else if at.Named {http.Redirect(w,r,"/test",http.StatusSeeOther)} else {http.Redirect(w,r,"/briefing",http.StatusSeeOther)};return}
+ if at.ID!=0 {if at.Finished {http.Redirect(w,r,"/result",http.StatusSeeOther)} else if at.TestStarted {http.Redirect(w,r,"/test",http.StatusSeeOther)} else if at.Ready {http.Redirect(w,r,"/code",http.StatusSeeOther)} else {http.Redirect(w,r,"/briefing",http.StatusSeeOther)};return}
  a.render(w,PageData{Quiz:a.quiz,JoinPath:"/start"})
 }
 func invitationKey(group string) string {
@@ -119,7 +118,7 @@ func (a *App) join(w http.ResponseWriter,r *http.Request) {
 }
 func token() (string,error) {b:=make([]byte,32);if _,err:=rand.Read(b);err!=nil{return "",err};return hex.EncodeToString(b),nil}
 func (a *App) start(w http.ResponseWriter,r *http.Request) {
- if at,_:=a.current(r);at.ID!=0 {if at.Finished {http.Redirect(w,r,"/result",303)} else if at.TestStarted {http.Redirect(w,r,"/test",303)} else if at.Named {http.Redirect(w,r,"/test",303)} else {http.Redirect(w,r,"/briefing",303)};return}
+ if at,_:=a.current(r);at.ID!=0 {if at.Finished {http.Redirect(w,r,"/result",303)} else if at.TestStarted {http.Redirect(w,r,"/test",303)} else if at.Ready {http.Redirect(w,r,"/code",303)} else {http.Redirect(w,r,"/briefing",303)};return}
  if err:=r.ParseForm();err!=nil {http.Error(w,"Bad form",400);return}
  name:="Участник"
  joinPath:="/start"
@@ -146,8 +145,14 @@ func (a *App) start(w http.ResponseWriter,r *http.Request) {
   if nr+nc>=60 {http.Error(w,"Набор по общей ссылке завершён (60 участников). Обратитесь к организаторам исследования.",409);return}
   if nr>nc {group="control"} else if nr==nc {var b [1]byte;if _,err=rand.Read(b[:]);err!=nil {http.Error(w,"Server error",500);return};if b[0]%2==0 {group="control"}}
  }
- _,err=tx.Exec(ctx,"INSERT INTO attempts(token,name,grp,assignment_source,name_set) VALUES($1,$2,$3,$4,FALSE)",t,name,group,source)
+ var attemptID int64
+ err=tx.QueryRow(ctx,"INSERT INTO attempts(token,name,grp,assignment_source,name_set) VALUES($1,$2,$3,$4,TRUE) RETURNING id",t,name,group,source).Scan(&attemptID)
  if err!=nil {http.Error(w,"Database error",500);return}
+ if group=="ranking" {
+  if attemptID>9000 {http.Error(w,"Лимит кодов исчерпан",503);return}
+  code:=fmt.Sprintf("К-%04d",1000+(attemptID*7919+381)%9000)
+  if _,err=tx.Exec(ctx,"UPDATE attempts SET participant_code=$2 WHERE id=$1",attemptID,code);err!=nil {http.Error(w,"Database error",500);return}
+ }
  if err=tx.Commit(ctx);err!=nil {http.Error(w,"Database error",500);return}
  http.SetCookie(w,&http.Cookie{Name:"experiment_session",Value:t,Path:"/",HttpOnly:true,SameSite:http.SameSiteLaxMode,Secure:r.TLS!=nil,MaxAge:86400})
  http.Redirect(w,r,"/briefing",http.StatusSeeOther)
@@ -155,33 +160,27 @@ func (a *App) start(w http.ResponseWriter,r *http.Request) {
 func (a *App) current(r *http.Request) (Attempt,error) {
  c,err:=r.Cookie("experiment_session");if err!=nil {return Attempt{},err}
  var at Attempt
- err=a.db.QueryRow(r.Context(),"SELECT id,name,grp,finished_at IS NOT NULL,COALESCE(score,0),test_started_at IS NOT NULL,ready_at IS NOT NULL,name_set FROM attempts WHERE token=$1",c.Value).Scan(&at.ID,&at.Name,&at.Group,&at.Finished,&at.Score,&at.TestStarted,&at.Ready,&at.Named)
+ err=a.db.QueryRow(r.Context(),"SELECT id,name,grp,finished_at IS NOT NULL,COALESCE(score,0),test_started_at IS NOT NULL,ready_at IS NOT NULL,name_set,COALESCE(participant_code,'') FROM attempts WHERE token=$1",c.Value).Scan(&at.ID,&at.Name,&at.Group,&at.Finished,&at.Score,&at.TestStarted,&at.Ready,&at.Named,&at.Code)
  return at,err
 }
 func (a *App) briefing(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil {http.Redirect(w,r,"/",303);return}
  if at.Finished {http.Redirect(w,r,"/result",303);return}
  if at.TestStarted {http.Redirect(w,r,"/test",303);return}
- if at.Named {http.Redirect(w,r,"/test",303);return}
  a.render(w,PageData{Quiz:a.quiz,Attempt:at,Total:-1})
 }
 func (a *App) begin(w http.ResponseWriter,r *http.Request) {
- at,err:=a.current(r);if err!=nil {http.Error(w,"Unauthorized",401);return}
- if at.Finished {http.Redirect(w,r,"/result",303);return}
- http.Redirect(w,r,"/name",303)
-}
-func (a *App) saveName(w http.ResponseWriter,r *http.Request) {
- at,err:=a.current(r);if err!=nil {http.Error(w,"Unauthorized",401);return}
- if at.Finished {http.Redirect(w,r,"/result",303);return}
- name:=strings.TrimSpace(r.FormValue("name"))
- if len([]rune(name))<1||len([]rune(name))>40||strings.ContainsAny(name," \t\n\r") {w.WriteHeader(http.StatusBadRequest);a.render(w,PageData{Quiz:a.quiz,Attempt:at,Total:-5,Error:"Введите только одно имя, без фамилии и пробелов."});return}
- if _,err=a.db.Exec(r.Context(),"UPDATE attempts SET name=$2,name_set=TRUE,ready_at=COALESCE(ready_at,clock_timestamp()),test_started_at=COALESCE(test_started_at,clock_timestamp()) WHERE id=$1 AND name_set=FALSE AND finished_at IS NULL",at.ID,name);err!=nil {http.Error(w,"Database error",500);return}
- http.Redirect(w,r,"/test",303)
-}
-func (a *App) namePage(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil {http.Redirect(w,r,"/",303);return}
  if at.Finished {http.Redirect(w,r,"/result",303);return}
- if at.Named {http.Redirect(w,r,"/test",303);return}
+ if at.TestStarted {http.Redirect(w,r,"/test",303);return}
+ if at.Group=="ranking" {http.Redirect(w,r,"/code",303);return}
+ a.launch(w,r)
+}
+func (a *App) codePage(w http.ResponseWriter,r *http.Request) {
+ at,err:=a.current(r);if err!=nil {http.Redirect(w,r,"/",303);return}
+ if at.Finished {http.Redirect(w,r,"/result",303);return}
+ if at.TestStarted {http.Redirect(w,r,"/test",303);return}
+ if at.Group!="ranking" {http.Redirect(w,r,"/briefing",303);return}
  a.render(w,PageData{Quiz:a.quiz,Attempt:at,Total:-5})
 }
 func (a *App) ready(w http.ResponseWriter,r *http.Request) {
@@ -194,8 +193,7 @@ func (a *App) ready(w http.ResponseWriter,r *http.Request) {
 func (a *App) launch(w http.ResponseWriter,r *http.Request) {
  at,err:=a.current(r);if err!=nil {http.Error(w,"Unauthorized",401);return}
  if at.Finished {http.Redirect(w,r,"/result",303);return}
- if !at.Ready {http.Redirect(w,r,"/briefing",303);return}
- if _,err=a.db.Exec(r.Context(),"UPDATE attempts SET test_started_at=COALESCE(test_started_at,clock_timestamp()) WHERE id=$1 AND ready_at IS NOT NULL AND finished_at IS NULL",at.ID);err!=nil {http.Error(w,"Database error",500);return}
+ if _,err=a.db.Exec(r.Context(),"UPDATE attempts SET ready_at=COALESCE(ready_at,clock_timestamp()),test_started_at=COALESCE(test_started_at,clock_timestamp()) WHERE id=$1 AND finished_at IS NULL",at.ID);err!=nil {http.Error(w,"Database error",500);return}
  http.Redirect(w,r,"/test",303)
 }
 func (a *App) test(w http.ResponseWriter,r *http.Request) {
@@ -242,7 +240,7 @@ func (a *App) finish(w http.ResponseWriter,r *http.Request) {
 func (a *App) getRanking(ctx context.Context) ([]Row,error) {
  // Demo rows live in a separate table and never enter attempts, exports or recruitment counts.
  rows,err:=a.db.Query(ctx,`SELECT name,score FROM (
-   SELECT name,score,finished_at AS sort_time FROM attempts
+   SELECT COALESCE(participant_code,name) AS name,score,finished_at AS sort_time FROM attempts
      WHERE grp='ranking' AND finished_at IS NOT NULL
    UNION ALL
    SELECT name,score,created_at AS sort_time FROM demo_participants
@@ -312,14 +310,14 @@ const htmlPage = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><me
 <section class="panel"><span class="eyebrow">Шаг 04 · Оценка состояния</span><h1>Как вы чувствуете себя сейчас?</h1><div class="survey-intro"><p>Теперь, пожалуйста, оцените представленные ниже утверждения, опираясь на то, как вы чувствуете себя в данный момент.</p><p>Для каждого утверждения выберите один из четырёх вариантов ответа:</p><p><strong>1</strong> — Нет, это не так<br><strong>2</strong> — Пожалуй, так<br><strong>3</strong> — Верно<br><strong>4</strong> — Совершенно верно</p><p>Пожалуйста, отвечайте искренне, ориентируясь на своё текущее состояние.</p></div><form action="/survey" method="post" data-complete-form="survey"><div class="survey-list">{{range $i,$item:=.SurveyItems}}<fieldset class="survey-item"><legend><strong>{{add $i 1}}.</strong> {{$item}}</legend><div class="scale four">{{range seq4}}<label><input type="radio" name="post_{{add $i 1}}" value="{{.}}" required><span>{{.}}</span></label>{{end}}</div></fieldset>{{end}}</div><div class="actions"><button class="btn" type="submit">Завершить исследование →</button></div></form></section>
 {{else if .Attempt.Finished}}
 <section class="panel"><span class="eyebrow">Шаг 03 · Результат</span><h1>Ваш результат</h1><div class="results"><div class="score">{{.Attempt.Score}} <small>/ {{.Total}}</small></div><p>Правильных ответов</p></div>
-{{if eq .Attempt.Group "ranking"}}<hr class="divider"><h2>Таблица лидеров</h2><p>Результаты участников соревновательной группы. При равных баллах выше находится тот, кто завершил тест раньше.</p><ol class="leaderboard">{{range $i,$row:=.Ranking}}<li><span><span class="place">{{add $i 1}}.</span>{{$row.Name}}</span><strong>{{$row.Score}} / {{$row.Total}}</strong></li>{{else}}<li>Пока нет результатов</li>{{end}}</ol>{{end}}
+{{if eq .Attempt.Group "ranking"}}<p class="muted">Ваш код участника: <strong>{{.Attempt.Code}}</strong></p><hr class="divider"><h2>Таблица лидеров</h2><p>Результаты участников соревновательной группы. При равных баллах выше находится тот, кто завершил тест раньше.</p><ol class="leaderboard">{{range $i,$row:=.Ranking}}<li><span><span class="place">{{add $i 1}}.</span>{{$row.Name}}{{if eq $row.Name $.Attempt.Code}} <small>(Вы)</small>{{end}}</span><strong>{{$row.Score}} / {{$row.Total}}</strong></li>{{else}}<li>Пока нет результатов</li>{{end}}</ol>{{end}}
 {{if not .SurveyDone}}<hr class="divider"><p>Остался последний этап — оценить своё текущее состояние.</p><div class="actions"><a class="btn" href="/survey">Продолжить →</a></div>{{else}}<div class="actions"><a class="btn" href="/thanks">К благодарности →</a></div>{{end}}</section>
 {{else if eq .Total -1}}
 <section class="panel"><span class="eyebrow">Шаг 02 · Инструкция</span><h1>Перед началом</h1>
 
 <p>Время на задания — <strong>10 минут</strong>.</p><p>Вам предстоит выполнить 5 заданий на логическое мышление и поиск закономерностей.</p><p>Пожалуйста, выполняйте задания самостоятельно, без использования искусственного интеллекта, поисковых систем и помощи других людей.</p><p>При необходимости можно пользоваться бумагой и ручкой для записей и вычислений.</p><p>Если задание покажется сложным, постарайтесь найти решение самостоятельно.</p><p><strong>Желаем удачи!</strong></p><form action="/begin" method="post"><div class="actions"><button class="btn" type="submit">Продолжить →</button></div></form></section>
 {{else if eq .Total -5}}
-<section class="panel"><span class="eyebrow">Шаг 03 · Имя участника</span><h1>Как вас зовут?</h1>{{if .Error}}<p role="alert" class="error">{{.Error}}</p>{{end}}<form method="post" action="/name" data-complete-form="name"><label class="field-title" for="name">Введите, пожалуйста, своё имя</label><input class="text-input" id="name" name="name" maxlength="40" required autocomplete="given-name" placeholder="Ваше имя"><p class="muted">Только одно имя, без фамилии и пробелов.</p><div class="actions"><button class="btn" type="submit">Продолжить →</button></div></form></section>
+<section class="panel"><span class="eyebrow">Шаг 03 · Код участника</span><h1>Ваш код участника</h1><p>Запомните или запишите этот код. По нему вы сможете найти свой результат в рейтинге.</p><div style="text-align:center;padding:36px 12px;margin:24px 0;background:#eef2ff;border:1px solid #c7d2fe;border-radius:18px"><strong style="font-size:clamp(42px,9vw,76px);letter-spacing:.07em;color:#3458df">{{.Attempt.Code}}</strong></div><p class="muted">Код закреплён за вами и не меняется. Таймер начнётся после нажатия кнопки.</p><form method="post" action="/launch"><div class="actions"><button class="btn" type="submit">Начать задания →</button></div></form></section>
 {{else if eq .Total -4}}
 <section class="panel"><span class="eyebrow">Шаг 03 · Перед заданиями</span><h1>Перед началом таймера</h1><p>Вам предстоит выполнить 5 заданий на логическое мышление и поиск закономерностей.</p><p>Пожалуйста, выполняйте задания самостоятельно, без использования искусственного интеллекта, поисковых систем и помощи других людей.</p><p>При необходимости можно пользоваться бумагой и ручкой для записей и вычислений.</p><p>Если задание покажется сложным, постарайтесь найти решение самостоятельно.</p><p><strong>Желаем удачи!</strong></p><form method="post" action="/launch"><div class="actions"><button class="btn" type="submit">Начать задания →</button></div></form></section>
 {{else}}
