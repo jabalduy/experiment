@@ -69,9 +69,9 @@ func (a *App) adminDashboard(w http.ResponseWriter,r *http.Request) {
  for _,q:=range questions {
   fmt.Fprintf(w,"<tr><td>%s</td><td>%s</td><td>%s</td></tr>",template.HTMLEscapeString(q.Label),percent(q.RankingCorrect,q.RankingTotal),percent(q.ControlCorrect,q.ControlTotal))
  }
- fmt.Fprint(w,`</tbody></table></div></section><section class="card"><h2>Участники (последние 200)</h2><p>Псевдонимы отображаются только в административной панели.</p><div class="scroll"><table><thead><tr><th>ID</th><th>Псевдоним</th><th>Группа</th><th>Назначение</th><th>Баллы</th><th>Задание 1</th><th>Задание 2</th><th>Задание 3</th><th>Задание 4</th><th>Задание 5</th><th>До</th><th>После</th><th>Время, с</th><th>Статус</th></tr></thead><tbody>`)
+ fmt.Fprint(w,`</tbody></table></div></section><section class="card"><h2>Участники (последние 200)</h2><div class="scroll"><table><thead><tr><th>ID</th><th>Группа</th><th>Назначение</th><th>Баллы</th><th>Задание 1</th><th>Задание 2</th><th>Задание 3</th><th>Задание 4</th><th>Задание 5</th><th>До</th><th>После</th><th>Время, с</th><th>Статус</th></tr></thead><tbody>`)
  for _,p:=range people {
-  fmt.Fprintf(w,"<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>",p.ID,template.HTMLEscapeString(p.Name),template.HTMLEscapeString(groupLabel(p.Group)),template.HTMLEscapeString(p.Source),p.Score)
+  fmt.Fprintf(w,"<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td>",p.ID,template.HTMLEscapeString(groupLabel(p.Group)),template.HTMLEscapeString(p.Source),p.Score)
   for _,answer:=range p.Answers {fmt.Fprintf(w,"<td>%s</td>",template.HTMLEscapeString(answer))}
   fmt.Fprintf(w,"<td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",p.Before,p.After,p.Seconds,p.Finished)
  }
